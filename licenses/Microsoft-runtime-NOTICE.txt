@@ -1,0 +1,22 @@
+Microsoft Visual C++ / Universal CRT / D3DCompiler runtime notice
+
+These unmodified Microsoft runtime binaries are not covered by this project
+MIT license. They originate from the MSVC / Windows SDK redistributable
+directories and Qt official deployment output, not arbitrary system DLLs.
+
+Microsoft Visual C++ Runtime 2022 license terms:
+https://visualstudio.microsoft.com/license-terms/vs2022-cruntime/
+
+Visual Studio 2022 redistribution list:
+https://learn.microsoft.com/visualstudio/releases/2022/redistribution
+
+Windows SDK archive and applicable SDK license:
+https://developer.microsoft.com/windows/downloads/sdk-archive/
+
+Redistributors must have the rights required by the applicable Microsoft
+toolchain / SDK license, distribute only permitted redistributable files,
+and preserve applicable notices. Merely including an MIT LICENSE does not
+grant Microsoft runtime redistribution rights.
+
+DirectXShaderCompiler dxcompiler.dll / dxil.dll has its separate complete
+license and third-party notices in DirectXShaderCompiler-LICENSE.txt.

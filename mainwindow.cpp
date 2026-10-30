@@ -1,0 +1,2546 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+
+#include "src/core/BatteryManager.h"
+#include "src/history/BatteryHistoryChart.h"
+#include "src/history/BatteryHistoryStore.h"
+#include "src/rpc/RpcServer.h"
+#include "src/scripting/PluginUpdater.h"
+#include "src/scripting/JsPluginLoader.h"
+#include "util/AppSettings.h"
+#include "util/DeviceSettings.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QCheckBox>
+#include <QCloseEvent>
+#include <QColor>
+#include <QCoreApplication>
+#include <QDialog>
+#include <QEvent>
+#include <QFileDialog>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QIcon>
+#include <QLayout>
+#include <QLayoutItem>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPalette>
+#include <QProgressBar>
+#include <QRegularExpression>
+#include <QPushButton>
+#include <QComboBox>
+#include <QDateTime>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QSizePolicy>
+#include <QSpinBox>
+#include <QStackedWidget>
+#include <QStyle>
+#include <QSystemTrayIcon>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QVBoxLayout>
+#include <QLabel>
+
+#include <algorithm>
+#include <utility>
+
+namespace
+{
+// 按档位返回电量进度条配色。
+QColor levelColor(BatteryLevel level)
+{
+    switch (level) {
+    case BatteryLevel::Full:
+        return QColor(76, 175, 80);   // 绿
+    case BatteryLevel::Medium:
+        return QColor(76, 175, 80);   // 绿（≥50 仍属安全）
+    case BatteryLevel::Low:
+        return QColor(255, 152, 0);   // 橙
+    case BatteryLevel::Empty:
+        return QColor(244, 67, 54);   // 红
+    case BatteryLevel::Unknown:
+    default:
+        return QColor(158, 158, 158); // 灰
+    }
+}
+
+// 仅供视觉一致的档位代表值（Xbox 进度条填充用，标签仍显示档位文本）。
+int levelRepresentativePercent(BatteryLevel level)
+{
+    switch (level) {
+    case BatteryLevel::Full:   return 100;
+    case BatteryLevel::Medium: return 55;
+    case BatteryLevel::Low:    return 25;
+    case BatteryLevel::Empty:  return 5;
+    default:                   return 0;
+    }
+}
+
+// 离散档位的可读文本。
+QString levelText(BatteryLevel level)
+{
+    switch (level) {
+    case BatteryLevel::Full:   return MainWindow::tr("Full");
+    case BatteryLevel::Medium: return MainWindow::tr("Medium");
+    case BatteryLevel::Low:    return MainWindow::tr("Low");
+    case BatteryLevel::Empty:  return MainWindow::tr("Empty");
+    default:                   return MainWindow::tr("Unknown");
+    }
+}
+
+// 设备是否有可展示的电量读数。
+bool hasKnownBattery(const BatteryDevice &device)
+{
+    return device.percentage >= 0 || device.level != BatteryLevel::Unknown;
+}
+
+// 有线设备通常不展示电量；Xbox 例外，因为不少 2.4 GHz dongle 会被 XInput
+// 标成有线，同时仍在 BatteryLevel 中提供真实的无线手柄电量。
+bool shouldUseBattery(const BatteryDevice &device)
+{
+    return hasKnownBattery(device)
+        && (!device.wired || device.type == BatteryDevice::Type::Xbox);
+}
+
+// 电量列显示文本：AirPods 三路电量；蓝牙精确百分比；Xbox 档位名；
+// 无有效电量的有线设备单独标注。
+QString batteryText(const BatteryDevice &device)
+{
+    if (device.wired && !shouldUseBattery(device)) {
+        return MainWindow::tr("Wired");
+    }
+    // AirPods / Beats / 小米耳机：显示左/右/盒三路电量，未知路显示为 "-"，
+    // 正在充电的那一路数值后追加 ⚡。
+    if (isThreeChannelAudio(device.subType)) {
+        const auto fmt = [](int v, bool charging) {
+            QString s = (v >= 0) ? QString::number(v) + QLatin1Char('%')
+                                 : QStringLiteral("-");
+            return charging ? s + QStringLiteral("⚡") : s;
+        };
+        QString text = QStringLiteral("L:") + fmt(device.leftPercent, device.leftCharging) +
+                       QStringLiteral("  R:") + fmt(device.rightPercent, device.rightCharging);
+        if (device.casePercent >= 0 || device.caseCharging) {
+            text += QStringLiteral("  Case:") + fmt(device.casePercent, device.caseCharging);
+        }
+        return text;
+    }
+    if (device.percentage >= 0) {
+        QString text = QString::number(device.percentage) + QLatin1Char('%');
+        if (device.charging) {
+            text += QStringLiteral(" ⚡");
+        }
+        return text;
+    }
+    return levelText(device.level);
+}
+
+// 本机电池的充放电功率数值文本（绝对值，1 位小数，如 "45.3"）。
+// 未知或空闲（rateMilliwatts == 0）返回空串；方向由充电标志 / 符号位另行判断。
+QString wattsNumberText(const BatteryDevice &device)
+{
+    if (device.rateMilliwatts == 0) {
+        return QString();
+    }
+    return QString::number(qAbs(device.rateMilliwatts) / 1000.0, 'f', 1);
+}
+
+// 状态列文本。
+QString statusText(const BatteryDevice &device)
+{
+    if (device.stale) {
+        // 计算距上次成功读到该设备过了多少秒；负值 / 0 兜底为 0。
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 ageSec = (now - device.lastSeenMsecs) / 1000;
+        return MainWindow::tr("Stale (last seen %1s ago)")
+            .arg(ageSec > 0 ? ageSec : 0);
+    }
+    if (device.wired) {
+        return MainWindow::tr("Wired power");
+    }
+    if (!device.connected) {
+        return MainWindow::tr("Disconnected");
+    }
+    // 本机电池：状态列附带充放电功率。方向优先看符号位（正 = 放电，
+    // 负 = 充电），个别驱动不带速率时回退充电标志。
+    if (device.type == BatteryDevice::Type::System) {
+        const QString watts = wattsNumberText(device);
+        if (!watts.isEmpty()) {
+            if (device.charging || device.rateMilliwatts < 0) {
+                return MainWindow::tr("Charging (%1 W)").arg(watts);
+            }
+            return MainWindow::tr("Discharging (%1 W)").arg(watts);
+        }
+        // 插电但未在充电（如已充满）：明确标注交流供电，避免误以为异常。
+        if (device.externalPower && !device.charging) {
+            return MainWindow::tr("On AC power");
+        }
+    }
+    if (device.charging) {
+        // 三路电量设备标明正在充电的部位（字母与 Case 单词，无需额外翻译），
+        // 如 "Charging (L+Case)"；其它设备维持单一 "Charging"。
+        if (isThreeChannelAudio(device.subType)) {
+            QString parts;
+            if (device.leftCharging) {
+                parts += QStringLiteral("L");
+            }
+            if (device.rightCharging) {
+                parts += parts.isEmpty() ? QStringLiteral("R") : QStringLiteral("+R");
+            }
+            if (device.caseCharging) {
+                parts += parts.isEmpty() ? QStringLiteral("Case") : QStringLiteral("+Case");
+            }
+            if (!parts.isEmpty()) {
+                return MainWindow::tr("Charging (%1)").arg(parts);
+            }
+        }
+        return MainWindow::tr("Charging");
+    }
+    return MainWindow::tr("Connected");
+}
+
+struct BatteryIconState
+{
+    BatteryLevel level = BatteryLevel::Unknown;
+    int percent = 0;
+};
+
+int clampPercent(int value)
+{
+    if (value < 0) {
+        return 0;
+    }
+    if (value > 100) {
+        return 100;
+    }
+    return value;
+}
+
+int iconPercentForDevice(const BatteryDevice &device)
+{
+    if (device.percentage >= 0) {
+        return clampPercent(device.percentage);
+    }
+    return levelRepresentativePercent(device.level);
+}
+
+// 程序化绘制电池形托盘 / 窗口图标，无需外部资源。
+// 颜色按最低设备档位走，填充高度按真实百分比走；无精确百分比的设备才使用档位代表值。
+QIcon drawBatteryIcon(BatteryLevel level, int percent, int size)
+{
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const QColor bodyColor = levelColor(level);
+    const QColor edgeColor(245, 247, 251);
+
+    const qreal margin = size * 0.18;
+    const qreal bodyW = size - margin * 2;
+    const qreal bodyH = bodyW * 1.6;
+    const qreal bodyX = margin;
+    const qreal bodyY = (size - bodyH) / 2;
+
+    // 电池正极凸起。
+    const qreal capW = bodyW * 0.4;
+    const qreal capH = bodyH * 0.12;
+    QRectF capRect(bodyX + (bodyW - capW) / 2, bodyY - capH, capW, capH);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(edgeColor);
+    painter.drawRoundedRect(capRect, 2, 2);
+
+    // 电池主体（描边）。
+    QRectF bodyRect(bodyX, bodyY, bodyW, bodyH);
+    painter.setBrush(QColor(30, 30, 35));
+    painter.setPen(QPen(edgeColor, size * 0.06));
+    painter.drawRoundedRect(bodyRect, 4, 4);
+
+    // 电量填充。
+    const int fillPercent = clampPercent(percent);
+    if (fillPercent > 0) {
+        QRectF fillRect = bodyRect.adjusted(
+            bodyRect.width() * 0.12,
+            bodyRect.height() * 0.12,
+            -bodyRect.width() * 0.12,
+            -bodyRect.height() * 0.12);
+        const qreal fillH = fillRect.height() * fillPercent / 100.0;
+        fillRect.setTop(fillRect.bottom() - fillH);
+        painter.setBrush(bodyColor);
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(fillRect, 2, 2);
+    }
+
+    return QIcon(pixmap);
+}
+
+QIcon drawBatteryIcon(BatteryLevel level, int size)
+{
+    return drawBatteryIcon(level, levelRepresentativePercent(level), size);
+}
+
+QIcon appIcon()
+{
+    // 直接把单张 512px 的 PNG 喂给 QIcon 时，QIcon 只会保留这一个源；
+    // Windows 托盘区需要 16/20/32px 之类的小尺寸，靠系统临时下采样时
+    // 经常缩成空白。这里预先按常用档位生成多分辨率源，让 QIcon /
+    // 系统托盘能直接命中匹配尺寸，避免无设备时托盘显示空白。
+    static QIcon icon;
+    if (icon.isNull()) {
+        const QPixmap source(QStringLiteral(":/icons/app.png"));
+        for (const int size : {16, 20, 24, 32, 48, 64, 128, 256}) {
+            icon.addPixmap(source.scaled(
+                size, size,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation));
+        }
+        icon.addPixmap(source); // 原图兜底（512）。
+    }
+    return icon;
+}
+
+// 找到列表中电量最低的设备，用于托盘 / 窗口图标。
+BatteryIconState lowestIconState(const QList<BatteryDevice> &devices)
+{
+    BatteryIconState lowest;
+    bool foundKnownBattery = false;
+    for (const auto &device : devices) {
+        if (device.wired && !shouldUseBattery(device)) {
+            continue;
+        }
+        if (device.percentage < 0 && device.level == BatteryLevel::Unknown) {
+            continue;
+        }
+
+        const int percent = iconPercentForDevice(device);
+        if (!foundKnownBattery || percent < lowest.percent) {
+            lowest.level = device.level;
+            lowest.percent = percent;
+            foundKnownBattery = true;
+        }
+    }
+    return lowest;
+}
+
+// 轮询间隔下拉框选项 -> 毫秒。
+int intervalFromIndex(int index)
+{
+    switch (index) {
+    case 0:  return 5000;
+    case 1:  return 10000;
+    case 2:  return 30000;
+    case 3:  return 60000;
+    default: return 10000;
+    }
+}
+
+// 粘性缓存保留下拉框选项 -> 秒。
+// 0 = 从不缓存（瞬时失败即移除，等价改造前行为）。
+int staleRetentionSecFromIndex(int index)
+{
+    switch (index) {
+    case 0:  return 0;     // 从不缓存
+    case 1:  return 60;    // 1 分钟
+    case 2:  return 180;   // 3 分钟（默认）
+    case 3:  return 300;   // 5 分钟
+    default: return 180;
+    }
+}
+
+int historyRetentionDaysFromIndex(int index)
+{
+    switch (index) {
+    case 0: return 7;
+    case 1: return 30;
+    case 2: return 90;
+    case 3: return 180;
+    case 4: return 365;
+    case 5: return 0; // 永久保留
+    default: return 30;
+    }
+}
+
+QString safeFileName(QString value)
+{
+    value.replace(QRegularExpression(QStringLiteral(R"([<>:"/\\|?*\x00-\x1F])")),
+                  QStringLiteral("_"));
+    value = value.trimmed();
+    return value.isEmpty() ? QStringLiteral("device") : value;
+}
+
+QString percentText(int value)
+{
+    return value >= 0 ? QString::number(value) + QLatin1Char('%')
+                      : MainWindow::tr("Unknown");
+}
+
+// 广播耳机最近一次广播的信号强度；0 表示 provider 未上报。
+QString rssiText(int rssi)
+{
+    return rssi < 0 ? QStringLiteral("%1 dBm").arg(rssi)
+                    : MainWindow::tr("Unknown");
+}
+
+QString yesNoText(bool value)
+{
+    return value ? MainWindow::tr("Yes") : MainWindow::tr("No");
+}
+
+// 三路电量设备的充电详情文本：列出正在充电的部位（如 "左耳, 充电盒"）；
+// 没有任何一路在充时回退到统一的 "No"。
+QString chargingPartsText(const BatteryDevice &device)
+{
+    if (!isThreeChannelAudio(device.subType)) {
+        return yesNoText(device.charging);
+    }
+    QString text;
+    const auto append = [&text](const QString &part) {
+        text += text.isEmpty() ? part : QStringLiteral(", ") + part;
+    };
+    if (device.leftCharging) {
+        append(MainWindow::tr("Left"));
+    }
+    if (device.rightCharging) {
+        append(MainWindow::tr("Right"));
+    }
+    if (device.caseCharging) {
+        append(MainWindow::tr("Case"));
+    }
+    return text.isEmpty() ? yesNoText(false) : text;
+}
+
+// 该设备当前是否已达到用户为它配置的低电量阈值。
+//
+// 调用方应先用 DeviceSettings::alertEnabled(id) 判断是否启用提醒；
+// 本函数只负责“假设已启用，是否低于阈值”。
+//
+// 阈值是按“百分比”存储的；但部分设备只有离散档位（如 XInput 手柄，
+// percentage = -1），无法与百分比阈值直接比较。对此采用保守映射：
+//   Empty  -> 视为 5%
+//   Low    -> 视为 25%
+//   Medium -> 视为 55%
+//   Full   -> 视为 100%
+// 与 mainwindow.cpp 中 levelRepresentativePercent 保持一致。
+// 当设备精确百分比 >= 0 时直接与阈值比较。
+bool isAtOrBelowThreshold(const BatteryDevice &device, int threshold)
+{
+    // 阈值合法范围 1..100，<=0 视为关闭（防御性，正常路径走 alertEnabled）。
+    if (threshold <= 0) {
+        return false;
+    }
+    if ((device.wired && !shouldUseBattery(device)) || !device.connected) {
+        return false;
+    }
+    if (device.percentage >= 0) {
+        return device.percentage <= threshold;
+    }
+    return levelRepresentativePercent(device.level) <= threshold;
+}
+
+// 策略 -> 最小重复间隔（秒）。
+//   Once   返回 -1：特殊处理（用 m_lowBatteryNotified set，不查时间戳）。
+//   Always 返回  0：不节流，每次刷新都允许提醒。
+//   周期性 返回对应秒数：距上次提醒不足该值则不提醒。
+int policyIntervalSec(AlertPolicy policy)
+{
+    switch (policy) {
+    case AlertPolicy::Always:     return 0;
+    case AlertPolicy::Every5Min:  return 5 * 60;
+    case AlertPolicy::Every15Min: return 15 * 60;
+    case AlertPolicy::Every30Min: return 30 * 60;
+    case AlertPolicy::Every60Min: return 60 * 60;
+    case AlertPolicy::Once:
+    default:                      return -1;
+    }
+}
+
+QLabel *makeValueLabel(const QString &text = QString())
+{
+    auto *label = new QLabel(text);
+    label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    label->setWordWrap(true);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    label->setMinimumWidth(180);
+    label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    return label;
+}
+
+// 重载：接受预创建的 title 标签 + 任意 value 控件（用于设置页的 ComboBox 行）。
+// 这样后续 retranslateUi 可以直接 setText 已有 title 标签。
+// 必须声明在 (const QString&, QLabel*) 重载之前，否则该重载内调用本重载时
+// 编译器尚未看到它，会因重载决议失败而报错。
+void addInfoRow(QVBoxLayout *layout, QLabel *titleLabel, QWidget *valueWidget)
+{
+    auto *row = new QWidget();
+    row->setObjectName(QStringLiteral("infoRow"));
+    auto *rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(18, 11, 18, 11);
+    rowLayout->setSpacing(20);
+
+    titleLabel->setObjectName(QStringLiteral("rowTitle"));
+    titleLabel->setMinimumWidth(136);
+    titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    valueWidget->setObjectName(QStringLiteral("rowValue"));
+    valueWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    rowLayout->addWidget(titleLabel);
+    rowLayout->addWidget(valueWidget, 1);
+    layout->addWidget(row);
+}
+
+QLabel *addInfoRow(QVBoxLayout *layout, const QString &title, QLabel *valueLabel)
+{
+    auto *titleLabel = new QLabel(title);
+    addInfoRow(layout, titleLabel, valueLabel);
+    return titleLabel;
+}
+
+QFrame *makeInfoGroup()
+{
+    auto *group = new QFrame();
+    group->setObjectName(QStringLiteral("detailGroup"));
+    auto *layout = new QVBoxLayout(group);
+    layout->setContentsMargins(0, 6, 0, 6);
+    layout->setSpacing(0);
+    return group;
+}
+
+QLabel *makeSectionLabel(const QString &text)
+{
+    auto *label = new QLabel(text);
+    label->setObjectName(QStringLiteral("sectionLabel"));
+    label->setContentsMargins(6, 6, 0, 0);
+    return label;
+}
+
+// 普通设备按稳定设备 id 保存提醒偏好；广播耳机按 provider 给出的型号分组保存。
+// 后者不能依赖 BLE 地址，因为未配对设备可能每次广播都换一个随机地址。
+QString alertSettingsId(const BatteryDevice &device)
+{
+    if (!device.alertGroupId.empty()) {
+        return QString::fromStdWString(device.alertGroupId);
+    }
+    return QString::fromStdWString(device.id);
+}
+} // namespace
+
+MainWindow::MainWindow(BatteryManager *manager, BatteryHistoryStore *historyStore,
+                       QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+    , m_manager(manager)
+    , m_historyStore(historyStore)
+{
+    ui->setupUi(this);
+    setupPages();
+    // 增加“提醒”“托盘”两列后需要更宽的可用区域；expandedTo 也会把旧版保存的
+    // 窄窗口自动扩到新下限，避免最右侧复选框被裁切。
+    setMinimumSize(900, 420);
+    const QSize savedWindowSize = AppSettings::windowSize();
+    resize(savedWindowSize.isValid()
+               ? savedWindowSize.expandedTo(minimumSize())
+               : QSize(940, 560));
+
+    // 表格基础外观。
+    ui->deviceTable->setColumnCount(6);
+    ui->deviceTable->horizontalHeader()->setStretchLastSection(false);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
+    ui->deviceTable->setColumnWidth(4, 76);
+    ui->deviceTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
+    ui->deviceTable->setColumnWidth(5, 76);
+    ui->deviceTable->verticalHeader()->setDefaultSectionSize(56);
+    ui->deviceTable->setShowGrid(false);
+    ui->deviceTable->setAlternatingRowColors(false);
+    ui->deviceTable->setMouseTracking(true);
+    ui->deviceTable->setWordWrap(false);
+    ui->deviceTable->setRowCount(1);
+    ui->deviceTable->setItem(0, 0, new QTableWidgetItem(tr("No devices detected")));
+
+    setupTray();
+    setupConnections();
+    applyTheme();
+    loadSettingsIntoUi();
+
+    // 默认应用图标；有设备数据后会切换为动态电量图标。
+    setWindowIcon(appIcon());
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::setRpcServer(RpcServer *server)
+{
+    m_rpcServer = server;
+    // 刷新一次状态文字（监听地址 / 未启用）。
+    if (m_rpcStatusValue) {
+        if (m_rpcServer && m_rpcServer->isListening()) {
+            m_rpcStatusValue->setText(
+                QStringLiteral("%1:%2").arg(m_rpcServer->listenHost())
+                                       .arg(m_rpcServer->listenPort()));
+        } else {
+            m_rpcStatusValue->setText(tr("Not running"));
+        }
+    }
+    // 同步勾选框：若 server 已由 --websocket_server 命令行启动，
+    // 则勾选并禁用（避免用户误以为关掉就能停）。
+    if (m_rpcServer && m_rpcServer->isListening()) {
+        const QSignalBlocker b(m_rpcEnabledCheck);
+        m_rpcEnabledCheck->setChecked(true);
+    }
+}
+
+void MainWindow::setupPages()
+{
+    auto *table = ui->deviceTable;
+    QWidget *central = ui->centralwidget;
+    QLayout *oldLayout = central->layout();
+
+    if (oldLayout) {
+        while (QLayoutItem *item = oldLayout->takeAt(0)) {
+            if (QWidget *widget = item->widget()) {
+                widget->setParent(nullptr);
+            } else if (QLayout *childLayout = item->layout()) {
+                while (QLayoutItem *childItem = childLayout->takeAt(0)) {
+                    if (QWidget *widget = childItem->widget()) {
+                        widget->setParent(nullptr);
+                    }
+                    delete childItem;
+                }
+            }
+            delete item;
+        }
+    }
+
+    central->setObjectName(QStringLiteral("centralwidget"));
+    auto *rootLayout = oldLayout ? qobject_cast<QVBoxLayout *>(oldLayout) : nullptr;
+    if (!rootLayout) {
+        rootLayout = new QVBoxLayout(central);
+    }
+    rootLayout->setContentsMargins(20, 20, 20, 20);
+    rootLayout->setSpacing(0);
+
+    m_stack = new QStackedWidget(central);
+    m_stack->setObjectName(QStringLiteral("contentStack"));
+    rootLayout->addWidget(m_stack);
+
+    m_listPage = new QWidget(m_stack);
+    auto *listLayout = new QVBoxLayout(m_listPage);
+    listLayout->setContentsMargins(0, 0, 0, 0);
+    listLayout->setSpacing(12);
+    listLayout->addWidget(table, 1);
+
+    auto *controlBar = new QWidget(m_listPage);
+    controlBar->setObjectName(QStringLiteral("controlBar"));
+    auto *controlLayout = new QHBoxLayout(controlBar);
+    controlLayout->setContentsMargins(2, 0, 2, 0);
+    controlLayout->setSpacing(10);
+
+    m_listHintLabel = new QLabel(tr("Double-click a device to edit device settings."));
+    m_listHintLabel->setObjectName(QStringLiteral("listHint"));
+    m_listHintLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_listHintLabel->setWordWrap(true);
+    m_listHintLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    controlLayout->addWidget(m_listHintLabel, 1);
+    controlLayout->addStretch(1);
+    m_refreshButton = new QPushButton(tr("Refresh"));
+    m_refreshButton->setObjectName(QStringLiteral("refreshButton"));
+    m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    m_refreshButton->setCursor(Qt::PointingHandCursor);
+    m_settingsButton = new QPushButton(tr("Settings"));
+    m_settingsButton->setObjectName(QStringLiteral("settingsButton"));
+    m_settingsButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    m_settingsButton->setCursor(Qt::PointingHandCursor);
+    controlLayout->addWidget(m_refreshButton);
+    controlLayout->addWidget(m_settingsButton);
+    listLayout->addWidget(controlBar);
+    m_stack->addWidget(m_listPage);
+
+    m_detailScrollArea = new QScrollArea(m_stack);
+    m_detailScrollArea->setObjectName(QStringLiteral("pageScrollArea"));
+    m_detailScrollArea->setWidgetResizable(true);
+    m_detailScrollArea->setFrameShape(QFrame::NoFrame);
+    m_detailScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    m_detailPage = new QWidget();
+    m_detailPage->setObjectName(QStringLiteral("scrollPage"));
+    auto *detailLayout = new QVBoxLayout(m_detailPage);
+    detailLayout->setContentsMargins(2, 0, 8, 2);
+    detailLayout->setSpacing(10);
+
+    auto *navLayout = new QHBoxLayout();
+    navLayout->setContentsMargins(0, 0, 0, 0);
+    m_detailBackButton = new QPushButton(tr("Back"));
+    m_detailBackButton->setObjectName(QStringLiteral("backButton"));
+    m_detailBackButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    m_detailBackButton->setCursor(Qt::PointingHandCursor);
+    navLayout->addWidget(m_detailBackButton);
+    navLayout->addStretch(1);
+    detailLayout->addLayout(navLayout);
+    connect(m_detailBackButton, &QPushButton::clicked, this, &MainWindow::showDeviceList);
+
+    auto *hero = new QFrame();
+    hero->setObjectName(QStringLiteral("detailHero"));
+    auto *heroLayout = new QVBoxLayout(hero);
+    heroLayout->setContentsMargins(20, 18, 20, 18);
+    heroLayout->setSpacing(9);
+    m_detailNameLabel = new QLabel();
+    m_detailNameLabel->setObjectName(QStringLiteral("detailName"));
+    m_detailNameLabel->setWordWrap(true);
+    heroLayout->addWidget(m_detailNameLabel);
+
+    auto *summaryLayout = new QHBoxLayout();
+    summaryLayout->setContentsMargins(0, 0, 0, 0);
+    summaryLayout->setSpacing(10);
+    m_detailBatteryLabel = new QLabel();
+    m_detailBatteryLabel->setObjectName(QStringLiteral("detailBattery"));
+    m_detailStatusLabel = new QLabel();
+    m_detailStatusLabel->setObjectName(QStringLiteral("detailStatus"));
+    summaryLayout->addWidget(m_detailBatteryLabel);
+    summaryLayout->addWidget(m_detailStatusLabel);
+    summaryLayout->addStretch(1);
+    heroLayout->addLayout(summaryLayout);
+    detailLayout->addWidget(hero);
+
+    m_overviewSectionLabel = makeSectionLabel(tr("Overview"));
+    detailLayout->addWidget(m_overviewSectionLabel);
+    auto *overviewGroup = makeInfoGroup();
+    auto *overviewLayout = qobject_cast<QVBoxLayout *>(overviewGroup->layout());
+    m_detailTypeValue = makeValueLabel();
+    m_detailStateValue = makeValueLabel();
+    m_detailBatteryValue = makeValueLabel();
+    m_detailPowerValue = makeValueLabel();
+    m_detailWiredValue = makeValueLabel();
+    m_detailIdValue = makeValueLabel();
+    m_detailTypeRowTitle = addInfoRow(overviewLayout, tr("Type"), m_detailTypeValue);
+    m_detailStatusRowTitle = addInfoRow(overviewLayout, tr("Status"), m_detailStateValue);
+    m_detailBatteryRowTitle = addInfoRow(overviewLayout, tr("Battery"), m_detailBatteryValue);
+    // 充放电功率行只对本机电池（System 类型）显示，refreshDetailPage 控制可见性。
+    m_detailPowerRowTitle = addInfoRow(overviewLayout, tr("Power"), m_detailPowerValue);
+    m_detailWiredRowTitle = addInfoRow(overviewLayout, tr("Wired"), m_detailWiredValue);
+    m_detailIdRowTitle = addInfoRow(overviewLayout, tr("Device ID"), m_detailIdValue);
+    detailLayout->addWidget(overviewGroup);
+
+    m_airPodsGroup = makeInfoGroup();
+    auto *airPodsLayout = qobject_cast<QVBoxLayout *>(m_airPodsGroup->layout());
+    m_leftBatteryValue = makeValueLabel();
+    m_rightBatteryValue = makeValueLabel();
+    m_caseBatteryValue = makeValueLabel();
+    m_chargingValue = makeValueLabel();
+    m_rssiValue = makeValueLabel();
+    m_leftBatteryRowTitle = addInfoRow(airPodsLayout, tr("Left battery"), m_leftBatteryValue);
+    m_rightBatteryRowTitle = addInfoRow(airPodsLayout, tr("Right battery"), m_rightBatteryValue);
+    m_caseBatteryRowTitle = addInfoRow(airPodsLayout, tr("Case battery"), m_caseBatteryValue);
+    m_chargingRowTitle = addInfoRow(airPodsLayout, tr("Charging"), m_chargingValue);
+    m_rssiRowTitle = addInfoRow(airPodsLayout, tr("Signal strength (RSSI)"), m_rssiValue);
+    detailLayout->addWidget(m_airPodsGroup);
+
+    // —— 设备设置（每台设备持久化的偏好）——
+    // 显示在设备信息页底部：别名 / 是否加入托盘 / 是否启用低电量提醒 / 提醒阈值。
+    // 控件值会随当前展示的设备切换而重新回填（refreshDetailPage 中处理）。
+    m_deviceSettingsSectionLabel = makeSectionLabel(tr("Device settings"));
+    detailLayout->addWidget(m_deviceSettingsSectionLabel);
+    m_deviceSettingsGroup = makeInfoGroup();
+    auto *deviceSettingsLayout =
+        qobject_cast<QVBoxLayout *>(m_deviceSettingsGroup->layout());
+    m_deviceAliasRowTitle = new QLabel(tr("Alias"));
+    m_deviceTrayRowTitle = new QLabel(tr("Show in tray"));
+    m_deviceThresholdRowTitle = new QLabel(tr("Low battery alert"));
+    m_deviceAlertPolicyRowTitle = new QLabel(tr("Repeat"));
+    m_deviceKeepCacheRowTitle = new QLabel(tr("Keep cached"));
+    m_deviceAliasEdit = new QLineEdit();
+    m_deviceAliasEdit->setObjectName(QStringLiteral("deviceAliasEdit"));
+    m_deviceAliasEdit->setClearButtonEnabled(true);
+    m_deviceTrayCheck = new QCheckBox();
+    m_deviceTrayCheck->setObjectName(QStringLiteral("deviceTrayCheck"));
+    m_deviceAlertCheck = new QCheckBox();
+    m_deviceAlertCheck->setObjectName(QStringLiteral("deviceAlertCheck"));
+    m_deviceKeepCacheCheck = new QCheckBox();
+    m_deviceKeepCacheCheck->setObjectName(QStringLiteral("deviceKeepCacheCheck"));
+    m_deviceThresholdSpin = new QSpinBox();
+    m_deviceThresholdSpin->setObjectName(QStringLiteral("deviceThresholdSpin"));
+    // 阈值范围 1..100：启用 / 关闭由独立的 m_deviceAlertCheck 控制，
+    // 因此阈值本身不再允许 0。
+    m_deviceThresholdSpin->setRange(1, DeviceSettings::kMaxThreshold);
+    m_deviceThresholdSpin->setSuffix(QStringLiteral("%"));
+    // 提醒策略下拉框：条目文本由 retranslateCombos() / retranslateAlertPolicyCombo()
+    // 用 tr 填充，便于翻译；index 顺序固定对应 AlertPolicy 枚举（见下方映射）。
+    m_deviceAlertPolicyCombo = new QComboBox();
+    m_deviceAlertPolicyCombo->setObjectName(QStringLiteral("deviceAlertPolicyCombo"));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Once", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Once)));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Every refresh", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Always)));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Every 5 minutes", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Every5Min)));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Every 15 minutes", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Every15Min)));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Every 30 minutes", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Every30Min)));
+    m_deviceAlertPolicyCombo->addItem(
+        tr("Every 60 minutes", "alert policy"), QVariant(static_cast<int>(AlertPolicy::Every60Min)));
+
+    // “低电量提醒阈值”行的 value 列是个复合控件：左为复选框（启用开关），
+    // 右为阈值数值框。复选框未勾选时阈值框灰显，避免产生“勾掉却还能调”的歧义。
+    auto *alertValueWidget = new QWidget();
+    auto *alertValueLayout = new QHBoxLayout(alertValueWidget);
+    alertValueLayout->setContentsMargins(0, 0, 0, 0);
+    alertValueLayout->setSpacing(10);
+    alertValueLayout->addWidget(m_deviceAlertCheck);
+    alertValueLayout->addWidget(m_deviceThresholdSpin, 1);
+
+    addInfoRow(deviceSettingsLayout, m_deviceAliasRowTitle, m_deviceAliasEdit);
+    addInfoRow(deviceSettingsLayout, m_deviceTrayRowTitle, m_deviceTrayCheck);
+    addInfoRow(deviceSettingsLayout, m_deviceThresholdRowTitle, alertValueWidget);
+    addInfoRow(deviceSettingsLayout, m_deviceAlertPolicyRowTitle, m_deviceAlertPolicyCombo);
+    addInfoRow(deviceSettingsLayout, m_deviceKeepCacheRowTitle, m_deviceKeepCacheCheck);
+    detailLayout->addWidget(m_deviceSettingsGroup);
+
+    // —— 电量历史图表 ——
+    m_historySectionLabel = makeSectionLabel(tr("Battery history"));
+    detailLayout->addWidget(m_historySectionLabel);
+    m_historyGroup = makeInfoGroup();
+    auto *historyLayout = qobject_cast<QVBoxLayout *>(m_historyGroup->layout());
+    historyLayout->setContentsMargins(12, 12, 12, 12);
+    historyLayout->setSpacing(10);
+    auto *historyHeader = new QHBoxLayout();
+    m_historyTitleLabel = new QLabel(tr("Battery history"));
+    m_historyTitleLabel->setObjectName(QStringLiteral("historyTitle"));
+    m_historyRangeCombo = new QComboBox();
+    m_historyRangeCombo->setObjectName(QStringLiteral("settingsCombo"));
+    m_exportHistoryButton = new QPushButton(tr("Export CSV"));
+    historyHeader->addWidget(m_historyTitleLabel);
+    historyHeader->addStretch(1);
+    historyHeader->addWidget(m_historyRangeCombo);
+    historyHeader->addWidget(m_exportHistoryButton);
+    historyLayout->addLayout(historyHeader);
+    m_historyLegendLabel = new QLabel();
+    m_historyLegendLabel->setObjectName(QStringLiteral("listHint"));
+    historyLayout->addWidget(m_historyLegendLabel);
+    m_historyChart = new BatteryHistoryChart();
+    historyLayout->addWidget(m_historyChart);
+    detailLayout->addWidget(m_historyGroup);
+    detailLayout->addStretch(1);
+
+    m_detailScrollArea->setWidget(m_detailPage);
+    m_stack->addWidget(m_detailScrollArea);
+
+    // —— 设置页（堆栈第三页）——
+    m_settingsScrollArea = new QScrollArea(m_stack);
+    m_settingsScrollArea->setObjectName(QStringLiteral("pageScrollArea"));
+    m_settingsScrollArea->setWidgetResizable(true);
+    m_settingsScrollArea->setFrameShape(QFrame::NoFrame);
+    m_settingsScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    m_settingsPage = new QWidget();
+    m_settingsPage->setObjectName(QStringLiteral("scrollPage"));
+    auto *settingsLayout = new QVBoxLayout(m_settingsPage);
+    settingsLayout->setContentsMargins(2, 0, 8, 2);
+    settingsLayout->setSpacing(10);
+
+    auto *settingsNavLayout = new QHBoxLayout();
+    settingsNavLayout->setContentsMargins(0, 0, 0, 0);
+    m_settingsBackButton = new QPushButton(tr("Back"));
+    m_settingsBackButton->setObjectName(QStringLiteral("backButton"));
+    m_settingsBackButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    m_settingsBackButton->setCursor(Qt::PointingHandCursor);
+    settingsNavLayout->addWidget(m_settingsBackButton);
+    settingsNavLayout->addStretch(1);
+    settingsLayout->addLayout(settingsNavLayout);
+
+    m_settingsTitleLabel = new QLabel(tr("Settings"));
+    m_settingsTitleLabel->setObjectName(QStringLiteral("detailName"));
+    m_settingsTitleLabel->setWordWrap(true);
+    settingsLayout->addWidget(m_settingsTitleLabel);
+
+    m_generalSectionLabel = makeSectionLabel(tr("General"));
+    settingsLayout->addWidget(m_generalSectionLabel);
+    auto *settingsGroup = makeInfoGroup();
+    auto *settingsGroupLayout = qobject_cast<QVBoxLayout *>(settingsGroup->layout());
+    // 行标题先建占位，retranslateUi() 中会刷新翻译。
+    m_intervalRowTitle = new QLabel(tr("Refresh interval"));
+    m_languageRowTitle = new QLabel(tr("Language"));
+    m_themeRowTitle = new QLabel(tr("Theme"));
+    m_startupRowTitle = new QLabel(tr("Start with Windows"));
+    m_staleRetentionRowTitle = new QLabel(tr("Stale retention"));
+    m_hideUnpairedAirPodsRowTitle = new QLabel(tr("Hide unpaired earbuds"));
+    m_showSystemBatteryRowTitle = new QLabel(tr("Show system battery"));
+    m_airPodsRssiRowTitle = new QLabel(tr("AirPods RSSI threshold"));
+    m_xiaomiBudsRssiRowTitle = new QLabel(tr("XiaomiBuds RSSI threshold"));
+    m_historyRetentionRowTitle = new QLabel(tr("History retention"));
+    m_versionRowTitle = new QLabel(tr("Version"));
+    m_versionValue = makeValueLabel();
+    m_versionValue->setText(QCoreApplication::applicationVersion());
+    m_projectRowTitle = new QLabel(tr("Project"));
+    m_projectLinkValue = makeValueLabel();
+    m_projectLinkValue->setText(QStringLiteral(
+        "<a href=\"https://github.com/JKWTCN/BatteryMonitor\">github.com/JKWTCN/BatteryMonitor</a>"));
+    m_projectLinkValue->setOpenExternalLinks(true);
+    m_projectLinkValue->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    m_intervalCombo = new QComboBox();
+    m_intervalCombo->setObjectName(QStringLiteral("settingsCombo"));
+    m_languageCombo = new QComboBox();
+    m_languageCombo->setObjectName(QStringLiteral("settingsCombo"));
+    m_themeCombo = new QComboBox();
+    m_themeCombo->setObjectName(QStringLiteral("settingsCombo"));
+    m_staleRetentionCombo = new QComboBox();
+    m_staleRetentionCombo->setObjectName(QStringLiteral("settingsCombo"));
+    m_startupCheck = new QCheckBox();
+    m_startupCheck->setObjectName(QStringLiteral("startupCheck"));
+    m_hideUnpairedAirPodsCheck = new QCheckBox();
+    m_hideUnpairedAirPodsCheck->setObjectName(QStringLiteral("hideUnpairedAirPodsCheck"));
+    m_showSystemBatteryCheck = new QCheckBox();
+    m_showSystemBatteryCheck->setObjectName(QStringLiteral("showSystemBatteryCheck"));
+    // 耳机广播 RSSI 阈值（dBm）：低于该值的广播视为信号太弱直接丢弃。
+    m_airPodsRssiSpin = new QSpinBox();
+    m_airPodsRssiSpin->setObjectName(QStringLiteral("settingsCombo"));
+    m_airPodsRssiSpin->setRange(AppSettings::kMinRssiThreshold,
+                                AppSettings::kMaxRssiThreshold);
+    m_airPodsRssiSpin->setValue(AppSettings::kDefaultRssiThreshold);
+    m_airPodsRssiSpin->setSuffix(QStringLiteral(" dBm"));
+    m_xiaomiBudsRssiSpin = new QSpinBox();
+    m_xiaomiBudsRssiSpin->setObjectName(QStringLiteral("settingsCombo"));
+    m_xiaomiBudsRssiSpin->setRange(AppSettings::kMinRssiThreshold,
+                                   AppSettings::kMaxRssiThreshold);
+    m_xiaomiBudsRssiSpin->setValue(AppSettings::kDefaultRssiThreshold);
+    m_xiaomiBudsRssiSpin->setSuffix(QStringLiteral(" dBm"));
+    m_historyRetentionCombo = new QComboBox();
+    m_historyRetentionCombo->setObjectName(QStringLiteral("settingsCombo"));
+    addInfoRow(settingsGroupLayout, m_intervalRowTitle, m_intervalCombo);
+    addInfoRow(settingsGroupLayout, m_languageRowTitle, m_languageCombo);
+    addInfoRow(settingsGroupLayout, m_themeRowTitle, m_themeCombo);
+    addInfoRow(settingsGroupLayout, m_staleRetentionRowTitle, m_staleRetentionCombo);
+    addInfoRow(settingsGroupLayout, m_hideUnpairedAirPodsRowTitle, m_hideUnpairedAirPodsCheck);
+    addInfoRow(settingsGroupLayout, m_showSystemBatteryRowTitle, m_showSystemBatteryCheck);
+    addInfoRow(settingsGroupLayout, m_airPodsRssiRowTitle, m_airPodsRssiSpin);
+    addInfoRow(settingsGroupLayout, m_xiaomiBudsRssiRowTitle, m_xiaomiBudsRssiSpin);
+    addInfoRow(settingsGroupLayout, m_historyRetentionRowTitle, m_historyRetentionCombo);
+    addInfoRow(settingsGroupLayout, m_startupRowTitle, m_startupCheck);
+    settingsLayout->addWidget(settingsGroup);
+
+    // —— WebSocket RPC 服务配置 ——
+    m_connectionsSectionLabel = makeSectionLabel(tr("Connections"));
+    settingsLayout->addWidget(m_connectionsSectionLabel);
+    auto *connectionsGroup = makeInfoGroup();
+    auto *connectionsLayout = qobject_cast<QVBoxLayout *>(connectionsGroup->layout());
+    m_rpcRowTitle = new QLabel(tr("WebSocket service"));
+    m_rpcEnabledCheck = new QCheckBox();
+    m_rpcEnabledCheck->setObjectName(QStringLiteral("hideUnpairedAirPodsCheck"));
+    m_rpcPortRowTitle = new QLabel(tr("WebSocket port"));
+    m_rpcPortSpin = new QSpinBox();
+    m_rpcPortSpin->setObjectName(QStringLiteral("settingsCombo"));
+    m_rpcPortSpin->setRange(AppSettings::kMinRpcPort, AppSettings::kMaxRpcPort);
+    m_rpcPortSpin->setValue(AppSettings::kDefaultRpcPort);
+    m_rpcHostRowTitle = new QLabel(tr("WebSocket host"));
+    m_rpcHostEdit = new QLineEdit();
+    m_rpcHostEdit->setObjectName(QStringLiteral("settingsCombo"));
+    m_rpcHostEdit->setPlaceholderText(QStringLiteral("127.0.0.1"));
+    m_rpcTokenRowTitle = new QLabel(tr("WebSocket token"));
+    m_rpcTokenEdit = new QLineEdit();
+    m_rpcTokenEdit->setObjectName(QStringLiteral("settingsCombo"));
+    m_rpcTokenEdit->setPlaceholderText(tr("(no auth)"));
+    m_rpcTokenEdit->setEchoMode(QLineEdit::Password);
+    m_rpcStatusValue = makeValueLabel();
+    m_rpcStatusValue->setObjectName(QStringLiteral("rowValue"));
+    addInfoRow(connectionsLayout, m_rpcRowTitle, m_rpcEnabledCheck);
+    addInfoRow(connectionsLayout, m_rpcPortRowTitle, m_rpcPortSpin);
+    addInfoRow(connectionsLayout, m_rpcHostRowTitle, m_rpcHostEdit);
+    addInfoRow(connectionsLayout, m_rpcTokenRowTitle, m_rpcTokenEdit);
+    addInfoRow(connectionsLayout, new QLabel(tr("Service status")), m_rpcStatusValue);
+    settingsLayout->addWidget(connectionsGroup);
+
+    m_pluginsSectionLabel = makeSectionLabel(tr("Plugins"));
+    settingsLayout->addWidget(m_pluginsSectionLabel);
+    auto *pluginsGroup = makeInfoGroup();
+    auto *pluginsLayout = qobject_cast<QVBoxLayout *>(pluginsGroup->layout());
+    m_pluginManageRowTitle = new QLabel(tr("Installed plugins"));
+    m_pluginManageButton = new QPushButton(tr("Manage plugins..."));
+    m_pluginManageButton->setCursor(Qt::PointingHandCursor);
+    addInfoRow(pluginsLayout, m_pluginManageRowTitle, m_pluginManageButton);
+    connect(m_pluginManageButton, &QPushButton::clicked, this, &MainWindow::showPluginManager);
+    m_pluginUpdateRowTitle = new QLabel(tr("Official plugins"));
+    m_pluginUpdateButton = new QPushButton(tr("Update from GitHub"));
+    m_pluginUpdateButton->setCursor(Qt::PointingHandCursor);
+    addInfoRow(pluginsLayout, m_pluginUpdateRowTitle, m_pluginUpdateButton);
+    m_pluginUpdateHint = makeValueLabel();
+    m_pluginUpdateHint->setObjectName(QStringLiteral("rowValue"));
+    m_pluginUpdateHint->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_pluginUpdateHint->setContentsMargins(18, 8, 18, 12);
+    m_pluginUpdateHint->setText(tr("Downloads plugins from JKWTCN/BatteryMonitor. Matching local files are overwritten; restart to apply."));
+    m_pluginUpdateHint->setWordWrap(true);
+    pluginsLayout->addWidget(m_pluginUpdateHint);
+    settingsLayout->addWidget(pluginsGroup);
+    m_pluginUpdater = new PluginUpdater(this);
+    connect(m_pluginUpdateButton, &QPushButton::clicked, this, [this] {
+        m_pluginUpdateButton->setEnabled(false);
+        m_pluginUpdater->start();
+    });
+    connect(m_pluginUpdater, &PluginUpdater::progress, this, [this](int current, int total) {
+        m_pluginUpdateButton->setText(total == 0 ? tr("Checking GitHub...")
+                                                : tr("Downloading %1/%2...").arg(current).arg(total));
+    });
+    connect(m_pluginUpdater, &PluginUpdater::finished, this,
+            [this](bool success, int updated, const QString &error) {
+        m_pluginUpdateButton->setEnabled(true);
+        m_pluginUpdateButton->setText(tr("Update from GitHub"));
+        refreshPluginList();
+        if (!success) {
+            QMessageBox::warning(this, tr("Plugin update"), error);
+        } else if (updated == 0) {
+            QMessageBox::information(this, tr("Plugin update"), tr("All official plugins are up to date."));
+        } else {
+            QMessageBox::information(this, tr("Plugin update"),
+                                     tr("Updated %1 plugin(s). Restart BatteryMonitor to apply the changes.").arg(updated));
+        }
+    });
+
+    m_aboutSectionLabel = makeSectionLabel(tr("About"));
+    settingsLayout->addWidget(m_aboutSectionLabel);
+    auto *aboutGroup = makeInfoGroup();
+    auto *aboutLayout = qobject_cast<QVBoxLayout *>(aboutGroup->layout());
+    addInfoRow(aboutLayout, m_versionRowTitle, m_versionValue);
+    addInfoRow(aboutLayout, m_projectRowTitle, m_projectLinkValue);
+    settingsLayout->addWidget(aboutGroup);
+    settingsLayout->addStretch(1);
+
+    m_settingsScrollArea->setWidget(m_settingsPage);
+    m_stack->addWidget(m_settingsScrollArea);
+    m_stack->setCurrentWidget(m_listPage);
+}
+
+void MainWindow::applyTheme()
+{
+    if (m_applyingTheme) {
+        return;
+    }
+    m_applyingTheme = true;
+
+    const QPalette pal = QApplication::palette();
+    const bool dark = pal.color(QPalette::Window).lightness() < 128;
+
+    const QString base = dark ? QStringLiteral("#171719") : QStringLiteral("#f5f5f7");
+    const QString group = dark ? QStringLiteral("#29292c") : QStringLiteral("#ffffff");
+    const QString groupAlt = dark ? QStringLiteral("#222225") : QStringLiteral("#f9f9fb");
+    const QString text = dark ? QStringLiteral("#f5f5f7") : QStringLiteral("#1d1d1f");
+    const QString secondary = dark ? QStringLiteral("#a1a1a6") : QStringLiteral("#6e6e73");
+    const QString border = dark ? QStringLiteral("#3b3b3f") : QStringLiteral("#dedee3");
+    const QString hover = dark ? QStringLiteral("#36363a") : QStringLiteral("#f0f0f3");
+    const QString accent = dark ? QStringLiteral("#0a84ff") : QStringLiteral("#007aff");
+
+    setStyleSheet(QStringLiteral(
+        "QWidget#centralwidget { background: %1; color: %4; }"
+        "QWidget { color: %4; font-size: 10pt; }"
+        "QStackedWidget#contentStack { background: transparent; }"
+        "QScrollArea#pageScrollArea { background: transparent; border: none; }"
+        "QWidget#scrollPage { background: transparent; }"
+        "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px 0; }"
+        "QScrollBar::handle:vertical { background: %6; border-radius: 5px; min-height: 28px; }"
+        "QScrollBar::handle:vertical:hover { background: %5; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+        "QTableWidget { background: %2; border: 1px solid %6; border-radius: 14px;"
+        "  padding: 7px; gridline-color: transparent; outline: none; selection-background-color: %7; }"
+        "QTableWidget::item { border: none; padding: 9px 10px; }"
+        "QTableWidget::item:hover { background: %7; border-radius: 6px; }"
+        "QHeaderView::section { background: %3; color: %5; border: none;"
+        "  border-bottom: 1px solid %6; padding: 8px 10px; font-weight: 600; }"
+        "QWidget#controlBar { background: transparent; }"
+        "QLabel { color: %4; }"
+        "QLabel#listHint { color: %5; padding: 0 4px; }"
+        "QLabel#sectionLabel { color: %5; font-size: 9pt; font-weight: 600; padding: 7px 6px 2px 6px; }"
+        "QFrame#detailHero { background: %2; border: 1px solid %6; border-radius: 16px; }"
+        "QLabel#detailName { font-size: 24pt; font-weight: 700; }"
+        "QLabel#detailBattery { color: %8; background: %3; border-radius: 10px;"
+        "  padding: 5px 10px; font-size: 12pt; font-weight: 700; }"
+        "QLabel#detailStatus { color: %5; padding: 5px 2px; font-size: 11pt; font-weight: 500; }"
+        "QLabel#historyTitle { color: %4; font-size: 11pt; font-weight: 600; }"
+        "QLabel#rowTitle { color: %4; font-weight: 500; }"
+        "QLabel#rowValue { color: %5; }"
+        "QFrame#detailGroup { background: %2; border: 1px solid %6; border-radius: 14px; }"
+        "QWidget#infoRow { background: transparent; border-bottom: 1px solid %6; }"
+        "QWidget#infoRow:hover { background: %3; }"
+        "QPushButton { background: %2; color: %4; border: 1px solid %6; border-radius: 10px;"
+        "  padding: 8px 15px; font-weight: 600; }"
+        "QPushButton:hover { background: %7; }"
+        "QPushButton:pressed { background: %3; padding-top: 9px; padding-bottom: 7px; }"
+        "QPushButton#backButton { background: transparent; color: %8; border: none;"
+        "  padding: 7px 5px; font-weight: 600; }"
+        "QPushButton#backButton:hover { background: %3; border-radius: 8px; }"
+        "QComboBox { background: %3; color: %4; border: 1px solid %6; border-radius: 9px;"
+        "  padding: 7px 28px 7px 11px; }"
+        "QComboBox:hover { background: %7; }"
+        "QComboBox QAbstractItemView { background: %2; color: %4; border: 1px solid %6;"
+        "  selection-background-color: %8; selection-color: white; }"
+        "QLineEdit { background: %3; color: %4; border: 1px solid %6; border-radius: 9px;"
+        "  padding: 7px 11px; }"
+        "QLineEdit:hover { background: %7; }"
+        "QSpinBox { background: %3; color: %4; border: 1px solid %6; border-radius: 9px;"
+        "  padding: 7px 11px; }"
+        "QSpinBox::up-button, QSpinBox::down-button { width: 18px; }"
+        "QCheckBox { spacing: 8px; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px;"
+        "  border: 1px solid %6; background: %2; }"
+        "QCheckBox::indicator:hover { background: %7; }"
+        "QCheckBox::indicator:checked { background: %8; border-color: %8; }")
+        .arg(base, group, groupAlt, text, secondary, border, hover, accent));
+
+    m_applyingTheme = false;
+}
+
+void MainWindow::setupTray()
+{
+    m_tray = new QSystemTrayIcon(appIcon(), this);
+    m_tray->setToolTip(tr("Battery Monitor"));
+
+    auto *menu = new QMenu(this);
+    m_toggleAction = menu->addAction(tr("Hide"));
+    m_refreshAction = menu->addAction(tr("Refresh"));
+    m_settingsAction = menu->addAction(tr("Settings..."));
+    menu->addSeparator();
+    m_quitAction = menu->addAction(tr("Quit"));
+
+    m_tray->setContextMenu(menu);
+    m_tray->show();
+}
+
+void MainWindow::setupConnections()
+{
+    connect(m_manager, &BatteryManager::devicesUpdated,
+            this, &MainWindow::onDevicesUpdated);
+
+    connect(m_refreshButton, &QPushButton::clicked,
+            this, &MainWindow::onRefreshClicked);
+    connect(m_settingsButton, &QPushButton::clicked,
+            this, &MainWindow::showSettingsPage);
+    connect(m_settingsBackButton, &QPushButton::clicked,
+            this, &MainWindow::showDeviceList);
+    connect(m_intervalCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onIntervalChanged);
+    connect(m_languageCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onLanguageChanged);
+    connect(m_themeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onThemeChanged);
+    connect(m_staleRetentionCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onStaleRetentionChanged);
+    connect(m_hideUnpairedAirPodsCheck, &QCheckBox::toggled,
+            this, &MainWindow::onHideUnpairedAirPodsChanged);
+    connect(m_showSystemBatteryCheck, &QCheckBox::toggled,
+            this, &MainWindow::onShowSystemBatteryChanged);
+    connect(m_airPodsRssiSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, &MainWindow::onAirPodsRssiChanged);
+    connect(m_xiaomiBudsRssiSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, &MainWindow::onXiaomiBudsRssiChanged);
+    connect(m_historyRetentionCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onHistoryRetentionChanged);
+    connect(m_startupCheck, &QCheckBox::toggled,
+            this, &MainWindow::onStartupToggled);
+    // WebSocket RPC 行。
+    connect(m_rpcEnabledCheck, &QCheckBox::toggled,
+            this, &MainWindow::onRpcEnabledToggled);
+    connect(m_rpcPortSpin, qOverload<int>(&QSpinBox::valueChanged),
+            this, &MainWindow::onRpcPortChanged);
+    connect(m_rpcHostEdit, &QLineEdit::editingFinished,
+            this, &MainWindow::onRpcHostEditingFinished);
+    connect(m_rpcTokenEdit, &QLineEdit::editingFinished,
+            this, &MainWindow::onRpcTokenEditingFinished);
+    connect(ui->deviceTable, &QTableWidget::cellDoubleClicked,
+            this, &MainWindow::showDeviceDetail);
+
+    // 设备信息页“显示到托盘” / “启用提醒” / “阈值” / “策略”变化即写盘。
+    connect(m_deviceTrayCheck, &QCheckBox::toggled,
+            this, &MainWindow::onDeviceTrayVisibleChanged);
+    connect(m_deviceAlertCheck, &QCheckBox::toggled,
+            this, &MainWindow::onDeviceAlertEnabledChanged);
+    connect(m_deviceThresholdSpin,
+            qOverload<int>(&QSpinBox::valueChanged),
+            this, &MainWindow::onDeviceThresholdChanged);
+    connect(m_deviceAlertPolicyCombo,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onDeviceAlertPolicyChanged);
+    connect(m_deviceAliasEdit, &QLineEdit::editingFinished,
+            this, &MainWindow::onDeviceAliasEditingFinished);
+    connect(m_deviceKeepCacheCheck, &QCheckBox::toggled,
+            this, &MainWindow::onDeviceKeepCacheChanged);
+    connect(m_historyRangeCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onHistoryRangeChanged);
+    connect(m_exportHistoryButton, &QPushButton::clicked,
+            this, &MainWindow::onExportHistoryClicked);
+    if (m_historyStore) {
+        connect(m_historyStore, &BatteryHistoryStore::historyChanged,
+                this, &MainWindow::onHistoryChanged);
+    }
+
+    connect(m_tray, &QSystemTrayIcon::activated,
+            this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::DoubleClick
+            || reason == QSystemTrayIcon::Trigger) {
+            onTrayActivated();
+        }
+    });
+
+    connect(m_toggleAction, &QAction::triggered, this, &MainWindow::onToggleVisible);
+    connect(m_refreshAction, &QAction::triggered, this, &MainWindow::onRefreshClicked);
+    connect(m_settingsAction, &QAction::triggered, this, &MainWindow::showSettingsPage);
+    connect(m_quitAction, &QAction::triggered, this, &MainWindow::onQuit);
+}
+
+void MainWindow::onDevicesUpdated(const QList<BatteryDevice> &devices)
+{
+    // 每轮刷新里每个 provider 完成都会触发一次本函数（一周期 12+ 次），
+    // 设备读数稳定时整表 / 详情 / 托盘的重复重建是纯浪费。展示内容与上次
+    // 完全一致时跳过这三步。notifyLowBattery 不受影响：Always / 周期性
+    // 重复提醒是时间驱动的，必须每次都评估。
+    bool contentChanged = !m_hasDevicesSnapshot || m_devices.size() != devices.size();
+    if (!contentChanged) {
+        for (int i = 0; i < devices.size(); ++i) {
+            if (!sameDisplayContent(m_devices.at(i), devices.at(i))) {
+                contentChanged = true;
+                break;
+            }
+        }
+    }
+    m_devices = devices;
+    m_hasDevicesSnapshot = true;
+
+    if (contentChanged) {
+        rebuildTable(devices);
+        refreshDetailPage();
+        updateTray(devices);
+    } else {
+        // RSSI 不参与 sameDisplayContent（避免逐轮波动触发整表重建），
+        // 详情页正在展示广播耳机时单独补刷这一行。
+        updateDetailRssi();
+    }
+    notifyLowBattery(devices);
+}
+
+void MainWindow::onRefreshClicked()
+{
+    if (m_manager) {
+        m_manager->refreshNow();
+    }
+}
+
+void MainWindow::onIntervalChanged(int index)
+{
+    const int msec = intervalFromIndex(index);
+    AppSettings::setRefreshInterval(msec);
+    if (m_manager) {
+        m_manager->setInterval(msec);
+    }
+}
+
+void MainWindow::onLanguageChanged(int index)
+{
+    // combo 顺序：0=跟随系统，1=en，2=zh_CN。
+    QString code;
+    switch (index) {
+    case 1:  code = QStringLiteral("en"); break;
+    case 2:  code = QStringLiteral("zh_CN"); break;
+    default: code = QString(); break;  // 跟随系统
+    }
+    AppSettings::setLanguage(code);
+    // 实际切换由 main.cpp 中的全局 retranslate() 完成，通过信号触发本类刷新。
+    emit languageChanged(code);
+}
+
+void MainWindow::onThemeChanged(int index)
+{
+    // combo 顺序：0=跟随系统，1=浅色，2=深色。
+    QString theme;
+    switch (index) {
+    case 1:  theme = QStringLiteral("light"); break;
+    case 2:  theme = QStringLiteral("dark"); break;
+    default: theme = QStringLiteral("system"); break;
+    }
+    AppSettings::setTheme(theme);
+    // signal 使用同线程直连：返回时 main.cpp 已完成 application palette 更新。
+    // 主动刷新一次，避免仅依赖 ApplicationPaletteChange（某些 Qt/Windows
+    // 样式组合不会把该事件稳定传到已设置样式表的顶层窗口）。
+    emit themeChanged(theme);
+    applyTheme();
+    rebuildTable(m_devices);
+    refreshDetailPage();
+}
+
+void MainWindow::onStartupToggled(bool checked)
+{
+    // 直接读写注册表 HKCU\...\Run。启用后开机时以 --minimized 静默启动。
+    if (!AppSettings::setStartupAutoStart(checked)) {
+        const QSignalBlocker blocker(m_startupCheck);
+        m_startupCheck->setChecked(AppSettings::startupAutoStart());
+        QMessageBox::warning(this,
+                             tr("Battery Monitor"),
+                             tr("Failed to update the Windows startup setting."));
+    }
+}
+
+void MainWindow::onStaleRetentionChanged(int index)
+{
+    const int sec = staleRetentionSecFromIndex(index);
+    AppSettings::setStaleRetentionSec(sec);
+    if (m_manager) {
+        m_manager->setStaleRetention(sec);
+    }
+}
+
+void MainWindow::onHideUnpairedAirPodsChanged(bool checked)
+{
+    AppSettings::setHideUnpairedAirPods(checked);
+    if (m_manager) {
+        m_manager->refreshNow();
+    }
+}
+
+void MainWindow::onShowSystemBatteryChanged(bool checked)
+{
+    AppSettings::setShowSystemBattery(checked);
+    // BatteryManager 在发布前按该设置过滤，立即刷新一轮使其生效。
+    if (m_manager) {
+        m_manager->refreshNow();
+    }
+}
+
+void MainWindow::onAirPodsRssiChanged(int value)
+{
+    AppSettings::setAirPodsRssiThreshold(value);
+    // Provider 在下一轮 readDevices() 读到新阈值，立即触发一轮刷新使其生效。
+    if (m_manager) {
+        m_manager->refreshNow();
+    }
+}
+
+void MainWindow::onXiaomiBudsRssiChanged(int value)
+{
+    AppSettings::setXiaomiBudsRssiThreshold(value);
+    if (m_manager) {
+        m_manager->refreshNow();
+    }
+}
+
+void MainWindow::onRpcEnabledToggled(bool checked)
+{
+    AppSettings::setRpcEnabled(checked);
+    if (checked) {
+        // 启动：若已在监听（--websocket_server 启动）则仅刷新状态。
+        if (m_rpcServer && m_rpcServer->isListening()) {
+            setRpcServer(m_rpcServer);
+            return;
+        }
+        if (!m_rpcServer) {
+            m_rpcServer = new RpcServer(m_manager, this);
+        }
+        const QString host = m_rpcHostEdit->text().trimmed().isEmpty()
+                                 ? QString::fromLatin1(AppSettings::kDefaultRpcHost)
+                                 : m_rpcHostEdit->text().trimmed();
+        const QString token = m_rpcTokenEdit->text();
+        if (!m_rpcServer->start(host, m_rpcPortSpin->value(), token)) {
+            QMessageBox::warning(this, tr("Battery Monitor"),
+                                 tr("Failed to start WebSocket service. "
+                                    "The port may be in use."));
+            const QSignalBlocker b(m_rpcEnabledCheck);
+            m_rpcEnabledCheck->setChecked(false);
+            AppSettings::setRpcEnabled(false);
+        }
+    } else {
+        // 停止。
+        if (m_rpcServer) {
+            m_rpcServer->stop();
+        }
+    }
+    setRpcServer(m_rpcServer);
+}
+
+void MainWindow::onRpcPortChanged(int value)
+{
+    AppSettings::setRpcPort(value);
+    // 端口改动需要重启 Server 才生效。
+    if (m_rpcServer && m_rpcServer->isListening()) {
+        m_rpcServer->stop();
+        onRpcEnabledToggled(true);
+    }
+}
+
+void MainWindow::onRpcHostEditingFinished()
+{
+    const QString host = m_rpcHostEdit->text().trimmed();
+    AppSettings::setRpcHost(host.isEmpty()
+                                ? QString::fromLatin1(AppSettings::kDefaultRpcHost)
+                                : host);
+    if (m_rpcServer && m_rpcServer->isListening()) {
+        m_rpcServer->stop();
+        onRpcEnabledToggled(true);
+    }
+}
+
+void MainWindow::onRpcTokenEditingFinished()
+{
+    AppSettings::setRpcToken(m_rpcTokenEdit->text());
+    if (m_rpcServer && m_rpcServer->isListening()) {
+        m_rpcServer->stop();
+        onRpcEnabledToggled(true);
+    }
+}
+
+void MainWindow::onTrayActivated()
+{
+    if (isHidden() || isMinimized()) {
+        showNormal();
+        activateWindow();
+        raise();
+    } else {
+        hide();
+    }
+}
+
+void MainWindow::onToggleVisible()
+{
+    if (isHidden() || isMinimized()) {
+        showNormal();
+        activateWindow();
+        raise();
+    } else {
+        hide();
+    }
+}
+
+void MainWindow::onQuit()
+{
+    AppSettings::setWindowSize(size());
+    // 清理托盘图标，避免退出后残留。
+    if (m_tray) {
+        m_tray->hide();
+    }
+    // 关闭窗口（关闭事件此时会被 ignore，因为 quitOnLastWindowClosed=false；
+    // 因此直接请求应用退出）。
+    QCoreApplication::exit(0);
+}
+
+void MainWindow::onDeviceTrayVisibleChanged(bool checked)
+{
+    if (m_currentDetailId.isEmpty()) {
+        return;
+    }
+    DeviceSettings::setTrayVisible(m_currentDetailId, checked);
+    // 详情页与列表页共用同一设置，返回列表前也立即同步现有快捷复选框。
+    const auto checks = ui->deviceTable->findChildren<QCheckBox *>(
+        QStringLiteral("tableTrayCheck"));
+    for (QCheckBox *check : checks) {
+        if (check->property("trayDeviceId").toString() == m_currentDetailId &&
+            check->isChecked() != checked) {
+            const QSignalBlocker blocker(check);
+            check->setChecked(checked);
+        }
+    }
+    // 立即反映到托盘（被取消勾选的设备从 tooltip / 最低档位计算中移除）。
+    updateTray(m_devices);
+}
+
+void MainWindow::onDeviceAlertEnabledChanged(bool checked)
+{
+    if (m_currentDetailId.isEmpty()) {
+        return;
+    }
+    QString settingsId = m_currentDetailId;
+    for (const BatteryDevice &device : std::as_const(m_devices)) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            settingsId = alertSettingsId(device);
+            break;
+        }
+    }
+    DeviceSettings::setAlertEnabled(settingsId, checked);
+    // 详情页与列表页共用同一设置，返回列表前也立即同步现有快捷复选框。
+    const auto checks = ui->deviceTable->findChildren<QCheckBox *>(
+        QStringLiteral("tableAlertCheck"));
+    for (QCheckBox *check : checks) {
+        if (check->property("alertSettingsId").toString() == settingsId &&
+            check->isChecked() != checked) {
+            const QSignalBlocker blocker(check);
+            check->setChecked(checked);
+        }
+    }
+    // 关闭提醒后阈值框 + 策略下拉框灰显；开启后可继续编辑。
+    if (m_deviceThresholdSpin) {
+        m_deviceThresholdSpin->setEnabled(checked);
+    }
+    if (m_deviceAlertPolicyCombo) {
+        m_deviceAlertPolicyCombo->setEnabled(checked);
+    }
+    // notifyLowBattery 自身已具备完整状态机：
+    //   - 关闭后设备会被移出 currentLow，已提醒记录随之清除；
+    //   - 重新开启时若仍低于阈值，会作为“新出现的低电量”被提醒。
+    // 因此这里不需要手动操作 m_lowBatteryNotified。
+    notifyLowBattery(m_devices);
+}
+
+void MainWindow::onDeviceThresholdChanged(int value)
+{
+    if (m_currentDetailId.isEmpty()) {
+        return;
+    }
+    QString settingsId = m_currentDetailId;
+    for (const BatteryDevice &device : std::as_const(m_devices)) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            settingsId = alertSettingsId(device);
+            break;
+        }
+    }
+    DeviceSettings::setLowBatteryThreshold(settingsId, value);
+    // 不能在这里 m_lowBatteryNotified.remove(id)！
+    // notifyLowBattery 内部已会基于最新阈值重新判断：
+    //   - 调高后仍低于阈值：设备在 m_lowBatteryNotified 里，不会重复提醒；
+    //   - 调低到不再低于阈值：自动从 m_lowBatteryNotified 移除，回升后能再提醒。
+    // 若在这里 remove，则每按一下数值框箭头都会清掉记录，触发一次提醒，
+    // 形成“调阈值过程中不停响”的现象。
+    notifyLowBattery(m_devices);
+}
+
+void MainWindow::onDeviceAlertPolicyChanged(int index)
+{
+    if (m_currentDetailId.isEmpty() || !m_deviceAlertPolicyCombo) {
+        return;
+    }
+    // combo 的每个 item 都把对应 AlertPolicy 枚举值存进 QVariant(userData)。
+    const QVariant data = m_deviceAlertPolicyCombo->itemData(index);
+    if (!data.isValid()) {
+        return;
+    }
+    const auto policy = static_cast<AlertPolicy>(data.toInt());
+    QString settingsId = m_currentDetailId;
+    for (const BatteryDevice &device : std::as_const(m_devices)) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            settingsId = alertSettingsId(device);
+            break;
+        }
+    }
+    DeviceSettings::setAlertPolicy(settingsId, policy);
+    // 切换策略时清掉该设备的“上次提醒时间”，避免新策略受旧时间戳误伤：
+    //   例如从 Every5Min 切回 Once 时，旧时间戳不应再被任何分支使用。
+    m_lastAlertTime.remove(settingsId);
+    notifyLowBattery(m_devices);
+}
+
+void MainWindow::onDeviceAliasEditingFinished()
+{
+    if (m_currentDetailId.isEmpty() || !m_deviceAliasEdit) {
+        return;
+    }
+
+    const QString alias = m_deviceAliasEdit->text().trimmed();
+    DeviceSettings::setAlias(m_currentDetailId, alias);
+    m_deviceAliasEdit->setText(DeviceSettings::alias(m_currentDetailId));
+
+    rebuildTable(m_devices);
+    refreshDetailPage();
+    updateTray(m_devices);
+}
+
+void MainWindow::onDeviceKeepCacheChanged(bool checked)
+{
+    if (m_currentDetailId.isEmpty()) {
+        return;
+    }
+    DeviceSettings::setKeepCachedForever(m_currentDetailId, checked);
+    // 设置本身只影响下一轮合并时的过期判定，无需立即改动 UI；
+    // 现存设备（无论在线还是已 stale）显示不变。
+}
+
+void MainWindow::showTrayHintOnce()
+{
+    if (m_trayHintShown) {
+        return;
+    }
+    m_trayHintShown = true;
+    if (m_tray) {
+        m_tray->showMessage(
+            tr("Battery Monitor"),
+            tr("The application will keep running in the system tray. "
+               "Use the tray menu to quit."),
+            appIcon(), 3000);
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    AppSettings::setWindowSize(size());
+    // 关闭窗口 -> 最小化到托盘（不退出）。仅“退出”菜单真正退出。
+    if (m_tray && m_tray->isVisible()) {
+        showTrayHintOnce();
+        hide();
+        event->ignore();
+        return;
+    }
+    QMainWindow::closeEvent(event);
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (m_applyingTheme) {
+        return;
+    }
+    if (event->type() == QEvent::ApplicationPaletteChange) {
+        applyTheme();
+        rebuildTable(m_devices);
+        refreshDetailPage();
+    }
+}
+
+void MainWindow::showDeviceDetail(int row)
+{
+    if (row < 0 || row >= m_devices.size()) {
+        return;
+    }
+
+    const BatteryDevice &device = m_devices.at(row);
+    const QString id = QString::fromStdWString(device.id);
+    if (id.isEmpty()) {
+        return;
+    }
+
+    m_currentDetailId = id;
+    refreshDetailPage();
+    if (m_stack && m_detailScrollArea) {
+        m_stack->setCurrentWidget(m_detailScrollArea);
+        m_detailScrollArea->verticalScrollBar()->setValue(0);
+    }
+}
+
+void MainWindow::showDeviceList()
+{
+    m_currentDetailId.clear();
+    if (m_stack && m_listPage) {
+        m_stack->setCurrentWidget(m_listPage);
+    }
+}
+
+void MainWindow::showSettingsPage()
+{
+    if (m_stack && m_settingsScrollArea) {
+        m_stack->setCurrentWidget(m_settingsScrollArea);
+        m_settingsScrollArea->verticalScrollBar()->setValue(0);
+    }
+}
+
+void MainWindow::showPluginManager()
+{
+    if (!m_pluginManager) {
+        m_pluginManager = new QDialog(this);
+        m_pluginManager->resize(720, 520);
+        m_pluginManager->setMinimumSize(480, 360);
+        auto *layout = new QVBoxLayout(m_pluginManager);
+        layout->setContentsMargins(18, 18, 18, 18);
+        layout->setSpacing(12);
+        m_pluginsEnabledCheck = new QCheckBox(m_pluginManager);
+        layout->addWidget(m_pluginsEnabledCheck);
+        m_pluginToggleHint = new QLabel(m_pluginManager);
+        m_pluginToggleHint->setObjectName(QStringLiteral("rowValue"));
+        m_pluginToggleHint->setWordWrap(true);
+        layout->addWidget(m_pluginToggleHint);
+        m_pluginSearchEdit = new QLineEdit(m_pluginManager);
+        m_pluginSearchEdit->setClearButtonEnabled(true);
+        layout->addWidget(m_pluginSearchEdit);
+        m_pluginTable = new QTableWidget(0, 2, m_pluginManager);
+        m_pluginTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_pluginTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_pluginTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_pluginTable->verticalHeader()->hide();
+        m_pluginTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        m_pluginTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        m_pluginTable->horizontalHeader()->setSortIndicator(1, Qt::AscendingOrder);
+        m_pluginTable->setWordWrap(false);
+        layout->addWidget(m_pluginTable, 1);
+        auto *footer = new QHBoxLayout();
+        m_pluginCountLabel = new QLabel(m_pluginManager);
+        m_pluginCountLabel->setWordWrap(true);
+        footer->addWidget(m_pluginCountLabel, 1);
+        m_pluginCloseButton = new QPushButton(m_pluginManager);
+        m_pluginCloseButton->setAutoDefault(false);
+        footer->addWidget(m_pluginCloseButton);
+        layout->addLayout(footer);
+        connect(m_pluginCloseButton, &QPushButton::clicked, m_pluginManager, &QDialog::close);
+        connect(m_pluginSearchEdit, &QLineEdit::textChanged, this, &MainWindow::filterPluginList);
+        connect(m_pluginsEnabledCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+            AppSettings::setPluginsEnabled(enabled);
+            m_pluginTable->setEnabled(enabled);
+        });
+        connect(m_pluginTable, &QTableWidget::itemChanged, this, [](QTableWidgetItem *item) {
+            if (item->column() == 0)
+                AppSettings::setPluginDisabled(item->data(Qt::UserRole).toString(), item->checkState() != Qt::Checked);
+        });
+        retranslatePluginManager();
+    }
+    refreshPluginList();
+    m_pluginManager->show();
+    m_pluginManager->raise();
+    m_pluginManager->activateWindow();
+    m_pluginSearchEdit->setFocus();
+}
+
+void MainWindow::refreshPluginList()
+{
+    if (!m_pluginManager) return;
+    const QSignalBlocker checkBlocker(m_pluginsEnabledCheck);
+    const QSignalBlocker tableBlocker(m_pluginTable);
+    m_pluginsEnabledCheck->setChecked(AppSettings::pluginsEnabled());
+    m_pluginTable->setEnabled(m_pluginsEnabledCheck->isChecked());
+    m_pluginTable->setSortingEnabled(false);
+    m_pluginTable->setRowCount(0);
+    const auto plugins = JsPluginLoader::installedPlugins(JsPluginLoader::defaultPluginDir());
+    for (const auto &plugin : plugins) {
+        const QString id = QString::fromStdWString(plugin.id);
+        const int row = m_pluginTable->rowCount();
+        m_pluginTable->insertRow(row);
+        auto *enabled = new QTableWidgetItem();
+        enabled->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
+        enabled->setData(Qt::UserRole, id);
+        // No saved preference means enabled, including newly downloaded plugins.
+        enabled->setCheckState(AppSettings::pluginDisabled(id) ? Qt::Unchecked : Qt::Checked);
+        m_pluginTable->setItem(row, 0, enabled);
+        auto *name = new QTableWidgetItem(id);
+        name->setToolTip(QString::fromStdWString(plugin.filePath));
+        m_pluginTable->setItem(row, 1, name);
+    }
+    m_pluginTable->setSortingEnabled(true);
+    filterPluginList();
+}
+
+void MainWindow::filterPluginList()
+{
+    if (!m_pluginTable) return;
+    const QString query = m_pluginSearchEdit->text().trimmed();
+    int visible = 0;
+    for (int row = 0; row < m_pluginTable->rowCount(); ++row) {
+        const auto *name = m_pluginTable->item(row, 1);
+        const bool matches = name->text().contains(query, Qt::CaseInsensitive)
+                             || name->toolTip().contains(query, Qt::CaseInsensitive);
+        m_pluginTable->setRowHidden(row, !matches);
+        if (matches) ++visible;
+    }
+    if (m_pluginTable->rowCount() == 0)
+        m_pluginCountLabel->setText(tr("No plugins installed. Download official plugins from Settings."));
+    else if (visible == 0)
+        m_pluginCountLabel->setText(tr("No matching plugins."));
+    else
+        m_pluginCountLabel->setText(tr("Showing %1 of %2 plugin(s)").arg(visible).arg(m_pluginTable->rowCount()));
+}
+
+void MainWindow::retranslatePluginManager()
+{
+    if (!m_pluginManager) return;
+    m_pluginManager->setWindowTitle(tr("Plugin manager"));
+    m_pluginsEnabledCheck->setText(tr("Enable plugins"));
+    m_pluginToggleHint->setText(tr("New plugins are enabled by default. Enable/disable changes take effect after restarting BatteryMonitor."));
+    m_pluginSearchEdit->setPlaceholderText(tr("Search plugins by name or path..."));
+    m_pluginSearchEdit->setAccessibleName(tr("Search plugins by name or path..."));
+    const QSignalBlocker blocker(m_pluginTable);
+    m_pluginTable->setHorizontalHeaderLabels({tr("Enabled"), tr("Plugin")});
+    m_pluginCloseButton->setText(tr("Close"));
+    filterPluginList();
+}
+
+int MainWindow::intervalIndex(int msec) const
+{
+    switch (msec) {
+    case 5000:  return 0;
+    case 10000: return 1;
+    case 30000: return 2;
+    case 60000: return 3;
+    default:    return 1;
+    }
+}
+
+int MainWindow::staleRetentionIndex(int sec) const
+{
+    switch (sec) {
+    case 0:   return 0;
+    case 60:  return 1;
+    case 180: return 2;
+    case 300: return 3;
+    default:  return 2; // 默认 3 分钟
+    }
+}
+
+int MainWindow::historyRetentionIndex(int days) const
+{
+    switch (days) {
+    case 7: return 0;
+    case 30: return 1;
+    case 90: return 2;
+    case 180: return 3;
+    case 365: return 4;
+    case 0: return 5;
+    default: return 1;
+    }
+}
+
+QString MainWindow::deviceDisplayName(const BatteryDevice &device) const
+{
+    const QString id = QString::fromStdWString(device.id);
+    const QString rawName = QString::fromStdWString(device.name).trimmed();
+    const QString fallbackName = rawName.isEmpty() ? tr("Unknown device") : rawName;
+    const QString alias = DeviceSettings::alias(id);
+
+    if (alias.isEmpty() || alias == fallbackName) {
+        return fallbackName;
+    }
+    return tr("%1 (%2)").arg(alias, fallbackName);
+}
+
+void MainWindow::loadSettingsIntoUi()
+{
+    // 先填入 combo 的可选项文本（带 tr，便于翻译）。
+    retranslateCombos();
+
+    const QSignalBlocker b1(m_intervalCombo);
+    const QSignalBlocker b2(m_languageCombo);
+    const QSignalBlocker b3(m_themeCombo);
+    const QSignalBlocker b4(m_startupCheck);
+    const QSignalBlocker b5(m_staleRetentionCombo);
+    const QSignalBlocker b6(m_hideUnpairedAirPodsCheck);
+    const QSignalBlocker b6b(m_showSystemBatteryCheck);
+    const QSignalBlocker b7(m_rpcEnabledCheck);
+    const QSignalBlocker b8(m_rpcPortSpin);
+    const QSignalBlocker b9(m_historyRetentionCombo);
+    const QSignalBlocker b10(m_airPodsRssiSpin);
+    const QSignalBlocker b11(m_xiaomiBudsRssiSpin);
+    // QLineEdit 没有同名的阻塞器，用 blockSignals 即可。
+    const bool hostBlocked = m_rpcHostEdit->blockSignals(true);
+    const bool tokenBlocked = m_rpcTokenEdit->blockSignals(true);
+
+    m_intervalCombo->setCurrentIndex(intervalIndex(AppSettings::refreshInterval()));
+
+    const QString lang = AppSettings::language();
+    int langIndex = 0;
+    if (lang == QLatin1String("en")) langIndex = 1;
+    else if (lang == QLatin1String("zh_CN")) langIndex = 2;
+    m_languageCombo->setCurrentIndex(langIndex);
+
+    const QString theme = AppSettings::theme();
+    int themeIndex = 0;
+    if (theme == QLatin1String("light")) themeIndex = 1;
+    else if (theme == QLatin1String("dark")) themeIndex = 2;
+    m_themeCombo->setCurrentIndex(themeIndex);
+
+    m_staleRetentionCombo->setCurrentIndex(
+        staleRetentionIndex(AppSettings::staleRetentionSec()));
+    m_hideUnpairedAirPodsCheck->setChecked(AppSettings::hideUnpairedAirPods());
+    m_showSystemBatteryCheck->setChecked(AppSettings::showSystemBattery());
+    m_airPodsRssiSpin->setValue(AppSettings::airPodsRssiThreshold());
+    m_xiaomiBudsRssiSpin->setValue(AppSettings::xiaomiBudsRssiThreshold());
+    m_historyRetentionCombo->setCurrentIndex(
+        historyRetentionIndex(AppSettings::historyRetentionDays()));
+
+    // 自启状态直接读注册表，与任务管理器显示保持一致。
+    m_startupCheck->setChecked(AppSettings::startupAutoStart());
+
+    // WebSocket RPC 行。
+    m_rpcEnabledCheck->setChecked(AppSettings::rpcEnabled());
+    m_rpcPortSpin->setValue(AppSettings::rpcPort());
+    m_rpcHostEdit->setText(AppSettings::rpcHost());
+    m_rpcTokenEdit->setText(AppSettings::rpcToken());
+    m_rpcHostEdit->blockSignals(hostBlocked);
+    m_rpcTokenEdit->blockSignals(tokenBlocked);
+
+    // 让 manager 同步到持久化的间隔与粘性缓存窗口。
+    if (m_manager) {
+        m_manager->setInterval(AppSettings::refreshInterval());
+        m_manager->setStaleRetention(AppSettings::staleRetentionSec());
+    }
+}
+
+void MainWindow::retranslateCombos()
+{
+    if (m_intervalCombo) {
+        m_intervalCombo->blockSignals(true);
+        // 保留当前 index，仅替换条目文本。
+        const int cur = m_intervalCombo->currentIndex();
+        m_intervalCombo->clear();
+        m_intervalCombo->addItem(tr("5 seconds"));
+        m_intervalCombo->addItem(tr("10 seconds"));
+        m_intervalCombo->addItem(tr("30 seconds"));
+        m_intervalCombo->addItem(tr("60 seconds"));
+        m_intervalCombo->setCurrentIndex(cur < 0 ? 1 : cur);
+        m_intervalCombo->blockSignals(false);
+    }
+    if (m_languageCombo) {
+        m_languageCombo->blockSignals(true);
+        const int cur = m_languageCombo->currentIndex();
+        m_languageCombo->clear();
+        m_languageCombo->addItem(tr("System"));
+        m_languageCombo->addItem(QStringLiteral("English"));
+        m_languageCombo->addItem(QStringLiteral("简体中文"));
+        m_languageCombo->setCurrentIndex(cur < 0 ? 0 : cur);
+        m_languageCombo->blockSignals(false);
+    }
+    if (m_themeCombo) {
+        m_themeCombo->blockSignals(true);
+        const int cur = m_themeCombo->currentIndex();
+        m_themeCombo->clear();
+        m_themeCombo->addItem(tr("System"));
+        m_themeCombo->addItem(tr("Light"));
+        m_themeCombo->addItem(tr("Dark"));
+        m_themeCombo->setCurrentIndex(cur < 0 ? 0 : cur);
+        m_themeCombo->blockSignals(false);
+    }
+    if (m_staleRetentionCombo) {
+        m_staleRetentionCombo->blockSignals(true);
+        const int cur = m_staleRetentionCombo->currentIndex();
+        m_staleRetentionCombo->clear();
+        m_staleRetentionCombo->addItem(tr("Never cache"));
+        m_staleRetentionCombo->addItem(tr("1 minute"));
+        m_staleRetentionCombo->addItem(tr("3 minutes"));
+        m_staleRetentionCombo->addItem(tr("5 minutes"));
+        m_staleRetentionCombo->setCurrentIndex(cur < 0 ? 2 : cur);
+        m_staleRetentionCombo->blockSignals(false);
+    }
+    if (m_historyRetentionCombo) {
+        const QSignalBlocker blocker(m_historyRetentionCombo);
+        const int cur = m_historyRetentionCombo->currentIndex();
+        m_historyRetentionCombo->clear();
+        m_historyRetentionCombo->addItem(tr("7 days"));
+        m_historyRetentionCombo->addItem(tr("30 days"));
+        m_historyRetentionCombo->addItem(tr("90 days"));
+        m_historyRetentionCombo->addItem(tr("180 days"));
+        m_historyRetentionCombo->addItem(tr("365 days"));
+        m_historyRetentionCombo->addItem(tr("Forever"));
+        m_historyRetentionCombo->setCurrentIndex(cur < 0 ? 1 : cur);
+    }
+    if (m_historyRangeCombo) {
+        const QSignalBlocker blocker(m_historyRangeCombo);
+        const int cur = m_historyRangeCombo->currentIndex();
+        m_historyRangeCombo->clear();
+        m_historyRangeCombo->addItem(tr("Last 24 hours"));
+        m_historyRangeCombo->addItem(tr("Last 7 days"));
+        m_historyRangeCombo->addItem(tr("Last 30 days"));
+        m_historyRangeCombo->addItem(tr("All history"));
+        m_historyRangeCombo->setCurrentIndex(cur < 0 ? 0 : cur);
+    }
+}
+
+void MainWindow::retranslateUi()
+{
+    // Refresh widgets created from mainwindow.ui, including the table headers.
+    ui->retranslateUi(this);
+
+    // 重译设置页静态控件文本。
+    if (m_listHintLabel) m_listHintLabel->setText(tr("Double-click a device to edit device settings."));
+    if (m_refreshButton) m_refreshButton->setText(tr("Refresh"));
+    if (m_settingsButton) m_settingsButton->setText(tr("Settings"));
+    if (m_detailBackButton) m_detailBackButton->setText(tr("Back"));
+    if (m_settingsBackButton) m_settingsBackButton->setText(tr("Back"));
+    if (m_settingsTitleLabel) m_settingsTitleLabel->setText(tr("Settings"));
+    if (m_overviewSectionLabel) m_overviewSectionLabel->setText(tr("Overview"));
+    if (m_detailTypeRowTitle) m_detailTypeRowTitle->setText(tr("Type"));
+    if (m_detailStatusRowTitle) m_detailStatusRowTitle->setText(tr("Status"));
+    if (m_detailBatteryRowTitle) m_detailBatteryRowTitle->setText(tr("Battery"));
+    if (m_detailPowerRowTitle) m_detailPowerRowTitle->setText(tr("Power"));
+    if (m_detailWiredRowTitle) m_detailWiredRowTitle->setText(tr("Wired"));
+    if (m_detailIdRowTitle) m_detailIdRowTitle->setText(tr("Device ID"));
+    if (m_leftBatteryRowTitle) m_leftBatteryRowTitle->setText(tr("Left battery"));
+    if (m_rightBatteryRowTitle) m_rightBatteryRowTitle->setText(tr("Right battery"));
+    if (m_caseBatteryRowTitle) m_caseBatteryRowTitle->setText(tr("Case battery"));
+    if (m_chargingRowTitle) m_chargingRowTitle->setText(tr("Charging"));
+    if (m_rssiRowTitle) m_rssiRowTitle->setText(tr("Signal strength (RSSI)"));
+    if (m_deviceSettingsSectionLabel) m_deviceSettingsSectionLabel->setText(tr("Device settings"));
+    if (m_historySectionLabel) m_historySectionLabel->setText(tr("Battery history"));
+    if (m_generalSectionLabel) m_generalSectionLabel->setText(tr("General"));
+    if (m_connectionsSectionLabel) m_connectionsSectionLabel->setText(tr("Connections"));
+    if (m_pluginsSectionLabel) m_pluginsSectionLabel->setText(tr("Plugins"));
+    if (m_pluginManageRowTitle) m_pluginManageRowTitle->setText(tr("Installed plugins"));
+    if (m_pluginManageButton) m_pluginManageButton->setText(tr("Manage plugins..."));
+    retranslatePluginManager();
+    if (m_pluginUpdateRowTitle) m_pluginUpdateRowTitle->setText(tr("Official plugins"));
+    if (m_pluginUpdateButton && !m_pluginUpdater->isRunning())
+        m_pluginUpdateButton->setText(tr("Update from GitHub"));
+    if (m_pluginUpdateHint)
+        m_pluginUpdateHint->setText(tr("Downloads plugins from JKWTCN/BatteryMonitor. Matching local files are overwritten; restart to apply."));
+    if (m_aboutSectionLabel) m_aboutSectionLabel->setText(tr("About"));
+    if (m_intervalRowTitle) m_intervalRowTitle->setText(tr("Refresh interval"));
+    if (m_languageRowTitle) m_languageRowTitle->setText(tr("Language"));
+    if (m_themeRowTitle) m_themeRowTitle->setText(tr("Theme"));
+    if (m_startupRowTitle) m_startupRowTitle->setText(tr("Start with Windows"));
+    if (m_staleRetentionRowTitle) m_staleRetentionRowTitle->setText(tr("Stale retention"));
+    if (m_hideUnpairedAirPodsRowTitle) m_hideUnpairedAirPodsRowTitle->setText(tr("Hide unpaired earbuds"));
+    if (m_showSystemBatteryRowTitle) m_showSystemBatteryRowTitle->setText(tr("Show system battery"));
+    if (m_airPodsRssiRowTitle) m_airPodsRssiRowTitle->setText(tr("AirPods RSSI threshold"));
+    if (m_xiaomiBudsRssiRowTitle) m_xiaomiBudsRssiRowTitle->setText(tr("XiaomiBuds RSSI threshold"));
+    if (m_historyRetentionRowTitle) m_historyRetentionRowTitle->setText(tr("History retention"));
+    if (m_historyTitleLabel) m_historyTitleLabel->setText(tr("Battery history"));
+    if (m_exportHistoryButton) m_exportHistoryButton->setText(tr("Export CSV"));
+    if (m_rpcRowTitle) m_rpcRowTitle->setText(tr("WebSocket service"));
+    if (m_rpcPortRowTitle) m_rpcPortRowTitle->setText(tr("WebSocket port"));
+    if (m_rpcHostRowTitle) m_rpcHostRowTitle->setText(tr("WebSocket host"));
+    if (m_rpcTokenRowTitle) m_rpcTokenRowTitle->setText(tr("WebSocket token"));
+    if (m_rpcStatusValue) {
+        if (m_rpcServer && m_rpcServer->isListening()) {
+            m_rpcStatusValue->setText(
+                QStringLiteral("%1:%2").arg(m_rpcServer->listenHost())
+                                       .arg(m_rpcServer->listenPort()));
+        } else {
+            m_rpcStatusValue->setText(tr("Not running"));
+        }
+    }
+    if (m_rpcTokenEdit) m_rpcTokenEdit->setPlaceholderText(tr("(no auth)"));
+    if (m_versionRowTitle) m_versionRowTitle->setText(tr("Version"));
+    if (m_versionValue) m_versionValue->setText(QCoreApplication::applicationVersion());
+    if (m_projectRowTitle) m_projectRowTitle->setText(tr("Project"));
+    retranslateCombos();
+    refreshHistoryChart();
+
+    // 托盘菜单 / 图标提示。
+    if (m_toggleAction) m_toggleAction->setText(isHidden() || isMinimized() ? tr("Show") : tr("Hide"));
+    if (m_refreshAction) m_refreshAction->setText(tr("Refresh"));
+    if (m_settingsAction) m_settingsAction->setText(tr("Settings..."));
+    if (m_quitAction) m_quitAction->setText(tr("Quit"));
+    if (m_tray) m_tray->setToolTip(tr("Battery Monitor"));
+
+    // 设备信息页“设备设置”分组的标题与控件。
+    if (m_deviceAliasRowTitle) m_deviceAliasRowTitle->setText(tr("Alias"));
+    if (m_deviceTrayRowTitle) m_deviceTrayRowTitle->setText(tr("Show in tray"));
+    if (m_deviceThresholdRowTitle) m_deviceThresholdRowTitle->setText(tr("Low battery alert"));
+    if (m_deviceAlertPolicyRowTitle) m_deviceAlertPolicyRowTitle->setText(tr("Repeat"));
+    if (m_deviceKeepCacheRowTitle) m_deviceKeepCacheRowTitle->setText(tr("Keep cached"));
+    // 策略下拉框的条目文本需重译，但保留当前选中项与各 item 的 userData(策略枚举)。
+    if (m_deviceAlertPolicyCombo) {
+        const int cur = m_deviceAlertPolicyCombo->currentIndex();
+        const QSignalBlocker b(m_deviceAlertPolicyCombo);
+        m_deviceAlertPolicyCombo->setItemText(0, tr("Once", "alert policy"));
+        m_deviceAlertPolicyCombo->setItemText(1, tr("Every refresh", "alert policy"));
+        m_deviceAlertPolicyCombo->setItemText(2, tr("Every 5 minutes", "alert policy"));
+        m_deviceAlertPolicyCombo->setItemText(3, tr("Every 15 minutes", "alert policy"));
+        m_deviceAlertPolicyCombo->setItemText(4, tr("Every 30 minutes", "alert policy"));
+        m_deviceAlertPolicyCombo->setItemText(5, tr("Every 60 minutes", "alert policy"));
+        m_deviceAlertPolicyCombo->setCurrentIndex(cur);
+    }
+
+    // 设置窗口标题（也会随 tr 刷新）。
+    setWindowTitle(tr("Battery Monitor"));
+
+    // 重译动态内容：表格 + 详情页（其中所有可见文本都已用 tr 包装）。
+    rebuildTable(m_devices);
+    refreshDetailPage();
+    updateTray(m_devices);
+}
+
+void MainWindow::refreshDetailPage()
+{
+    if (m_currentDetailId.isEmpty()) {
+        return;
+    }
+
+    const BatteryDevice *current = nullptr;
+    for (const auto &device : m_devices) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            current = &device;
+            break;
+        }
+    }
+
+    if (!current) {
+        showDeviceList();
+        return;
+    }
+
+    const BatteryDevice &device = *current;
+    const QString name = QString::fromStdWString(device.name);
+    const QString id = QString::fromStdWString(device.id);
+    // 三路电量音频设备（AirPods / 小米耳机）展示左/右/盒分组。
+    const bool isAirPods = isThreeChannelAudio(device.subType);
+
+    m_detailNameLabel->setText(deviceDisplayName(device));
+    m_detailBatteryLabel->setText(batteryText(device));
+    m_detailStatusLabel->setText(statusText(device));
+    m_detailTypeValue->setText(BatteryManager::typeLabel(device.type));
+    m_detailStateValue->setText(statusText(device));
+    m_detailBatteryValue->setText(batteryText(device));
+    // 充放电功率行仅本机电池有意义：功率 + 方向；空闲或驱动未上报时显示占位符。
+    const bool isSystemBattery = device.type == BatteryDevice::Type::System;
+    if (m_detailPowerRowTitle && m_detailPowerRowTitle->parentWidget()) {
+        m_detailPowerRowTitle->parentWidget()->setVisible(isSystemBattery);
+    }
+    if (isSystemBattery) {
+        const QString watts = wattsNumberText(device);
+        m_detailPowerValue->setText(watts.isEmpty()
+            // 无速率：插电通常是「已充满、停止充电」的空闲态，其余为未知。
+            ? (device.externalPower ? tr("Idle") : tr("Unknown"))
+            : watts + QStringLiteral(" W"));
+    }
+    m_detailWiredValue->setText(yesNoText(device.wired));
+    m_detailIdValue->setText(id.isEmpty() ? tr("Unknown") : id);
+
+    m_airPodsGroup->setVisible(isAirPods);
+    if (isAirPods) {
+        m_leftBatteryValue->setText(percentText(device.leftPercent));
+        m_rightBatteryValue->setText(percentText(device.rightPercent));
+        m_caseBatteryValue->setText(percentText(device.casePercent));
+        m_chargingValue->setText(chargingPartsText(device));
+        m_rssiValue->setText(rssiText(device.rssi));
+    }
+
+    // —— 回填设备级设置（屏蔽信号，避免回调写盘）——
+    if (m_deviceAliasEdit && m_deviceTrayCheck && m_deviceAlertCheck && m_deviceThresholdSpin &&
+        m_deviceAlertPolicyCombo && m_deviceKeepCacheCheck) {
+        const QSignalBlocker b0(m_deviceAliasEdit);
+        const QSignalBlocker b1(m_deviceTrayCheck);
+        const QSignalBlocker b2(m_deviceAlertCheck);
+        const QSignalBlocker b3(m_deviceThresholdSpin);
+        const QSignalBlocker b4(m_deviceAlertPolicyCombo);
+        const QSignalBlocker b5(m_deviceKeepCacheCheck);
+        m_deviceAliasEdit->setText(DeviceSettings::alias(id));
+        m_deviceAliasEdit->setPlaceholderText(name.isEmpty() ? tr("Unknown device") : name);
+        m_deviceTrayCheck->setChecked(DeviceSettings::trayVisible(id));
+        const QString alertId = alertSettingsId(device);
+        const bool alertOn = DeviceSettings::alertEnabled(alertId);
+        m_deviceAlertCheck->setChecked(alertOn);
+        m_deviceThresholdSpin->setValue(DeviceSettings::lowBatteryThreshold(alertId));
+        // 复选框未勾选时阈值框 + 策略下拉框一并灰显（提醒都关了，策略也无意义）。
+        m_deviceThresholdSpin->setEnabled(alertOn);
+        m_deviceAlertPolicyCombo->setEnabled(alertOn);
+        // 找到 itemData 等于当前策略的下标。
+        const auto currentPolicy = static_cast<int>(DeviceSettings::alertPolicy(alertId));
+        int policyIndex = 0;
+        for (int i = 0; i < m_deviceAlertPolicyCombo->count(); ++i) {
+            if (m_deviceAlertPolicyCombo->itemData(i).toInt() == currentPolicy) {
+                policyIndex = i;
+                break;
+            }
+        }
+        m_deviceAlertPolicyCombo->setCurrentIndex(policyIndex);
+        m_deviceKeepCacheCheck->setChecked(DeviceSettings::keepCachedForever(id));
+    }
+    refreshHistoryChart();
+}
+
+void MainWindow::updateDetailRssi()
+{
+    if (!m_rssiValue || m_currentDetailId.isEmpty()) {
+        return;
+    }
+    for (const BatteryDevice &device : std::as_const(m_devices)) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            if (isThreeChannelAudio(device.subType)) {
+                m_rssiValue->setText(rssiText(device.rssi));
+            }
+            return;
+        }
+    }
+}
+
+qint64 MainWindow::historyRangeStartMsecs() const
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    switch (m_historyRangeCombo ? m_historyRangeCombo->currentIndex() : 0) {
+    case 0: return now - 24LL * 60 * 60 * 1000;
+    case 1: return now - 7LL * 24 * 60 * 60 * 1000;
+    case 2: return now - 30LL * 24 * 60 * 60 * 1000;
+    case 3: return 0;
+    default: return now - 24LL * 60 * 60 * 1000;
+    }
+}
+
+void MainWindow::refreshHistoryChart()
+{
+    if (!m_historyChart || m_currentDetailId.isEmpty()) {
+        return;
+    }
+    const bool available = m_historyStore && m_historyStore->isAvailable();
+    m_exportHistoryButton->setEnabled(available);
+    m_historyRangeCombo->setEnabled(available);
+    if (!available) {
+        m_historyLegendLabel->clear();
+        m_historyChart->setSamples({});
+        m_historyChart->setErrorText(m_historyStore
+            ? tr("History is unavailable: %1").arg(m_historyStore->errorString())
+            : tr("History is unavailable."));
+        return;
+    }
+
+    const QList<BatteryHistorySample> rows = m_historyStore->samples(
+        m_currentDetailId, historyRangeStartMsecs(), QDateTime::currentMSecsSinceEpoch());
+    m_historyChart->setSamples(rows);
+    const bool airPods = std::any_of(rows.cbegin(), rows.cend(),
+        [](const BatteryHistorySample &s) {
+            return isThreeChannelAudio(s.subType);
+        });
+    m_historyLegendLabel->setText(airPods
+        ? tr("Blue: left  •  Green: right  •  Orange: case  •  Gray dashed: offline / no data")
+        : tr("Blue: battery level  •  Gray dashed: offline / no data"));
+}
+
+void MainWindow::onHistoryRangeChanged(int index)
+{
+    Q_UNUSED(index)
+    refreshHistoryChart();
+}
+
+void MainWindow::onHistoryChanged(const QString &deviceId)
+{
+    if (deviceId == m_currentDetailId) {
+        refreshHistoryChart();
+    }
+}
+
+void MainWindow::onHistoryRetentionChanged(int index)
+{
+    const int days = historyRetentionDaysFromIndex(index);
+    if (m_historyStore) {
+        m_historyStore->setRetentionDays(days);
+    } else {
+        AppSettings::setHistoryRetentionDays(days);
+    }
+    refreshHistoryChart();
+}
+
+void MainWindow::onExportHistoryClicked()
+{
+    if (!m_historyStore || !m_historyStore->isAvailable() || m_currentDetailId.isEmpty()) {
+        return;
+    }
+    QString deviceName = m_currentDetailId;
+    for (const BatteryDevice &device : std::as_const(m_devices)) {
+        if (QString::fromStdWString(device.id) == m_currentDetailId) {
+            deviceName = deviceDisplayName(device);
+            break;
+        }
+    }
+    const qint64 from = historyRangeStartMsecs();
+    const qint64 to = QDateTime::currentMSecsSinceEpoch();
+    const QString start = from > 0
+        ? QDateTime::fromMSecsSinceEpoch(from).toString(QStringLiteral("yyyyMMdd"))
+        : QStringLiteral("all");
+    const QString end = QDateTime::fromMSecsSinceEpoch(to).toString(QStringLiteral("yyyyMMdd"));
+    const QString suggested = QStringLiteral("BatteryMonitor_%1_%2_%3.csv")
+        .arg(safeFileName(deviceName), start, end);
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export battery history"), suggested, tr("CSV files (*.csv)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    QString error;
+    if (!m_historyStore->exportCsv(path, m_currentDetailId, from, to, &error)) {
+        QMessageBox::warning(this, tr("Battery Monitor"),
+                             tr("Failed to export CSV: %1").arg(error));
+        return;
+    }
+    QMessageBox::information(this, tr("Battery Monitor"), tr("CSV export completed."));
+}
+
+void MainWindow::rebuildTable(const QList<BatteryDevice> &devices)
+{
+    QTableWidget *table = ui->deviceTable;
+
+    if (devices.isEmpty()) {
+        table->clearContents();
+        table->clearSpans();
+        table->setRowCount(1);
+        // 占位提示跨整行显示。
+        auto *placeholder = new QTableWidgetItem(tr("No devices detected"));
+        placeholder->setTextAlignment(Qt::AlignCenter);
+        const QColor muted(160, 160, 160);
+        placeholder->setForeground(muted);
+        table->setSpan(0, 0, 1, 6);
+        table->setItem(0, 0, placeholder);
+        table->setItem(0, 1, new QTableWidgetItem());
+        table->setItem(0, 2, new QTableWidgetItem());
+        table->setItem(0, 3, new QTableWidgetItem());
+        table->setItem(0, 4, new QTableWidgetItem());
+        table->setItem(0, 5, new QTableWidgetItem());
+        return;
+    }
+
+    table->clearSpans();
+    table->clearContents();
+    table->setRowCount(static_cast<int>(devices.size()));
+
+    for (int row = 0; row < devices.size(); ++row) {
+        const auto &device = devices.at(row);
+
+        // stale（缓存沿用）设备整行标灰：电量数保留但视觉降级，提示非实时值。
+        const QColor muted(160, 160, 160);
+
+        auto *nameItem = new QTableWidgetItem(deviceDisplayName(device));
+        if (device.stale) {
+            nameItem->setForeground(muted);
+        }
+        table->setItem(row, 0, nameItem);
+
+        auto *typeItem = new QTableWidgetItem(BatteryManager::typeLabel(device.type));
+        typeItem->setTextAlignment(Qt::AlignCenter);
+        if (device.stale) {
+            typeItem->setForeground(muted);
+        }
+        table->setItem(row, 1, typeItem);
+
+        // 电量列：用进度条单元格直观展示。
+        auto *bar = new QProgressBar();
+        bar->setRange(0, 100);
+        const bool hasPercent = device.percentage >= 0;
+        const int displayPercent = hasPercent
+            ? device.percentage
+            : levelRepresentativePercent(device.level);
+        const bool useBattery = shouldUseBattery(device);
+        bar->setValue(device.wired && !useBattery ? 100 : displayPercent);
+        bar->setTextVisible(false);
+        bar->setFixedHeight(16);
+
+        // 进度条配色（通过 stylesheet 设置 chunk 颜色）。
+        const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+        // stale 设备把 chunk 也降级为中性灰，进一步区分实时值与缓存值。
+        const QColor color = device.stale
+            ? muted
+            : (useBattery ? levelColor(device.level) : QColor(142, 142, 147));
+        const QString trackColor = dark ? QStringLiteral("#3a3a3c") : QStringLiteral("#e5e5ea");
+        bar->setStyleSheet(QStringLiteral(
+            "QProgressBar { background: %1; border-radius: 6px; }"
+            "QProgressBar::chunk { background: %2; border-radius: 6px; }")
+            .arg(trackColor, color.name()));
+
+        // 用标签文字叠加在进度条上显示百分比 / 档位 / 有线。
+        auto *overlay = new QLabel(batteryText(device));
+        overlay->setAlignment(Qt::AlignCenter);
+        const QString overlayColor = dark ? QStringLiteral("#f5f5f7") : QStringLiteral("#1d1d1f");
+        overlay->setStyleSheet(QStringLiteral("color: %1; font-weight: %2;")
+            .arg(device.stale ? muted.name() : overlayColor,
+                 device.stale ? QStringLiteral("400") : QStringLiteral("600")));
+
+        auto *cell = new QWidget();
+        auto *cellLayout = new QVBoxLayout(cell);
+        cellLayout->setContentsMargins(6, 2, 6, 2);
+        cellLayout->setSpacing(0);
+        cellLayout->addWidget(bar);
+        cellLayout->addWidget(overlay);
+        table->setCellWidget(row, 2, cell);
+
+        auto *statusItem = new QTableWidgetItem(statusText(device));
+        statusItem->setTextAlignment(Qt::AlignCenter);
+        if (device.stale) {
+            statusItem->setForeground(muted);
+        }
+        table->setItem(row, 3, statusItem);
+
+        // 列表页快捷提醒开关。广播设备使用型号分组 id，因此同型号的多个随机
+        // MAC 行会同步勾选；普通蓝牙、HID、Xbox 仍各自独立。
+        const QString alertId = alertSettingsId(device);
+        auto *alertCheck = new QCheckBox();
+        alertCheck->setObjectName(QStringLiteral("tableAlertCheck"));
+        alertCheck->setProperty("alertSettingsId", alertId);
+        alertCheck->setChecked(DeviceSettings::alertEnabled(alertId));
+        if (!device.alertGroupId.empty()) {
+            alertCheck->setToolTip(
+                tr("Broadcast devices of the same model share this setting."));
+        }
+        auto *alertCell = new QWidget();
+        auto *alertLayout = new QHBoxLayout(alertCell);
+        alertLayout->setContentsMargins(8, 0, 8, 0);
+        alertLayout->setAlignment(Qt::AlignCenter);
+        alertLayout->addWidget(alertCheck);
+        table->setCellWidget(row, 4, alertCell);
+        connect(alertCheck, &QCheckBox::toggled, this,
+                [this, table, alertId](bool checked) {
+            DeviceSettings::setAlertEnabled(alertId, checked);
+            // 同一广播型号可能同时显示为多行，立即同步所有对应复选框。
+            const auto checks = table->findChildren<QCheckBox *>(
+                QStringLiteral("tableAlertCheck"));
+            for (QCheckBox *other : checks) {
+                if (other->property("alertSettingsId").toString() == alertId &&
+                    other->isChecked() != checked) {
+                    const QSignalBlocker blocker(other);
+                    other->setChecked(checked);
+                }
+            }
+            notifyLowBattery(m_devices);
+        });
+
+        // 列表页快捷托盘开关。与设备设置页“显示到托盘”同一设置（按设备 id
+        // 持久化），任意一侧切换都会立即反映到托盘图标与另一侧。
+        const QString trayId = QString::fromStdWString(device.id);
+        auto *trayCheck = new QCheckBox();
+        trayCheck->setObjectName(QStringLiteral("tableTrayCheck"));
+        trayCheck->setProperty("trayDeviceId", trayId);
+        trayCheck->setChecked(DeviceSettings::trayVisible(trayId));
+        auto *trayCell = new QWidget();
+        auto *trayLayout = new QHBoxLayout(trayCell);
+        trayLayout->setContentsMargins(8, 0, 8, 0);
+        trayLayout->setAlignment(Qt::AlignCenter);
+        trayLayout->addWidget(trayCheck);
+        table->setCellWidget(row, 5, trayCell);
+        connect(trayCheck, &QCheckBox::toggled, this,
+                [this, table, trayId](bool checked) {
+            DeviceSettings::setTrayVisible(trayId, checked);
+            // 正常情况每行设备 id 唯一；防御性同步同 id 的其余复选框。
+            const auto checks = table->findChildren<QCheckBox *>(
+                QStringLiteral("tableTrayCheck"));
+            for (QCheckBox *other : checks) {
+                if (other->property("trayDeviceId").toString() == trayId &&
+                    other->isChecked() != checked) {
+                    const QSignalBlocker blocker(other);
+                    other->setChecked(checked);
+                }
+            }
+            // 立即反映到托盘（被取消勾选的设备从 tooltip / 最低档位计算中移除）。
+            updateTray(m_devices);
+        });
+    }
+
+    table->resizeColumnsToContents();
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    table->setColumnWidth(4, 76);
+    table->setColumnWidth(5, 76);
+}
+
+void MainWindow::updateTray(const QList<BatteryDevice> &devices)
+{
+    // 仅把“勾选了显示到托盘”的设备纳入托盘展示。
+    // 设备掉线重连后，因为偏好按 id 持久化，筛选结果保持一致。
+    QList<BatteryDevice> visible;
+    visible.reserve(devices.size());
+    for (const auto &device : devices) {
+        const QString id = QString::fromStdWString(device.id);
+        if (DeviceSettings::trayVisible(id)) {
+            visible.append(device);
+        }
+    }
+
+    const BatteryIconState iconState = lowestIconState(visible);
+
+    if (visible.isEmpty()) {
+        m_tray->setIcon(appIcon());
+        setWindowIcon(appIcon());
+        m_tray->setToolTip(tr("Battery Monitor - No devices"));
+        return;
+    }
+
+    const QIcon icon = drawBatteryIcon(iconState.level, iconState.percent, 32);
+    m_tray->setIcon(icon);
+    setWindowIcon(drawBatteryIcon(iconState.level, iconState.percent, 64));
+
+    // tooltip 每设备一行。
+    QStringList lines;
+    lines.reserve(visible.size());
+    for (const auto &device : visible) {
+        // stale 设备在电量后追加「(stale)」标记，让用户一眼区分缓存值。
+        QString suffix;
+        if (device.stale) {
+            suffix = QStringLiteral(" (") + tr("stale") + QStringLiteral(")");
+        }
+        // 本机电池行附带充放电功率，悬停托盘即可看到（方向见 ⚡ 标记）。
+        if (device.type == BatteryDevice::Type::System) {
+            const QString watts = wattsNumberText(device);
+            if (!watts.isEmpty()) {
+                suffix += QStringLiteral(" (") + watts + QStringLiteral(" W)");
+            }
+        }
+        lines << QStringLiteral("%1: %2%3")
+                    .arg(deviceDisplayName(device),
+                         batteryText(device),
+                         suffix);
+    }
+    m_tray->setToolTip(lines.join(QLatin1Char('\n')));
+}
+
+void MainWindow::notifyLowBattery(const QList<BatteryDevice> &devices)
+{
+    // —— 第一步：确定当前哪些设备“低于阈值”，同时拿到每台设备的策略 ——
+    // currentLow: 本轮刷新中，达到提醒条件的设备集合（启用 alert 且电量 ≤ 阈值）。
+    // 同时为每台设备读取策略，下面会按策略分流决定是否真的弹通知。
+    QSet<QString> currentLow;
+    for (const auto &device : devices) {
+        // stale 设备的电量为缓存旧值，不代表实时状态：
+        // 既不应据此新发提醒，也不应据此清理「已提醒」状态。直接跳过。
+        if (device.stale) {
+            continue;
+        }
+        const QString alertId = alertSettingsId(device);
+        if (!DeviceSettings::alertEnabled(alertId)) {
+            continue;
+        }
+        const int threshold = DeviceSettings::lowBatteryThreshold(alertId);
+        if (isAtOrBelowThreshold(device, threshold)) {
+            currentLow.insert(alertId);
+        }
+    }
+
+    // —— 第二步：电量回升的设备清理状态 ——
+    // 对所有策略统一适用：不再低于阈值时，重置它的“已提醒/时间戳”，
+    // 这样下次再次跌破阈值时会重新走一次完整的提醒判断。
+    for (auto it = m_lowBatteryNotified.begin(); it != m_lowBatteryNotified.end();) {
+        if (!currentLow.contains(*it)) {
+            it = m_lowBatteryNotified.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_lastAlertTime.begin(); it != m_lastAlertTime.end();) {
+        if (!currentLow.contains(it.key())) {
+            it = m_lastAlertTime.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // —— 第三步：对仍处于低电量的设备，按各自策略决定是否弹通知 ——
+    for (const auto &device : devices) {
+        const QString alertId = alertSettingsId(device);
+        if (!currentLow.contains(alertId)) {
+            continue;
+        }
+        // stale 设备已在第一步被排除出 currentLow；防御性再判一次。
+        if (device.stale) {
+            continue;
+        }
+        // 同型号广播设备共用 alertId，但只应为其中真正低于阈值的那一台展示通知。
+        if (!isAtOrBelowThreshold(
+                device, DeviceSettings::lowBatteryThreshold(alertId))) {
+            continue;
+        }
+        const AlertPolicy policy = DeviceSettings::alertPolicy(alertId);
+        const int intervalSec = policyIntervalSec(policy);
+
+        // 策略分流：判断“本次是否应该提醒”。
+        bool shouldNotify = false;
+        if (intervalSec < 0) {
+            // Once：首次跌破阈值时提醒一次，记录在 set 里，回升前不再响。
+            if (!m_lowBatteryNotified.contains(alertId)) {
+                shouldNotify = true;
+                m_lowBatteryNotified.insert(alertId);
+            }
+        } else {
+            // Always（0）/ 周期（>0）：基于“上次提醒时刻”节流。
+            const QDateTime now = QDateTime::currentDateTime();
+            const auto it = m_lastAlertTime.constFind(alertId);
+            const bool due = (it == m_lastAlertTime.constEnd())
+                || (it.value().secsTo(now) >= intervalSec);
+            if (due) {
+                shouldNotify = true;
+                m_lastAlertTime.insert(alertId, now);
+            }
+        }
+
+        if (shouldNotify) {
+            const QIcon notificationIcon = drawBatteryIcon(
+                device.level,
+                iconPercentForDevice(device),
+                64);
+            m_tray->showMessage(
+                tr("Low Battery"),
+                tr("%1: %2").arg(deviceDisplayName(device), batteryText(device)),
+                notificationIcon, 4000);
+        }
+    }
+}

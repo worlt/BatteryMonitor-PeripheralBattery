@@ -1,0 +1,88 @@
+#pragma once
+
+#include "src/core/IBatteryProvider.h"
+#include "src/providers/bluetooth/SharedBleWatcher.h"
+
+#include <winrt/base.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <map>
+#include <mutex>
+
+// AirPods / Beats 电量提供者：解析 Apple Continuity BLE 广播包得到左/右/盒电量。
+//
+// 背景：AirPods、Beats 等苹果音频设备不暴露标准 BLE GATT Battery Service，
+// 只有 Apple 私有“Continuity”协议。其电量信息周期性地以 BLE 厂商数据广播
+// （CompanyId = 0x004C），无需配对或 GATT 连接即可被旁听。
+//
+// 实现：
+//   - 订阅 SharedBleWatcher（进程内共用的 Active 扫描 watcher），过滤
+//     CompanyId=76(0x004C)。
+//   - 收到广播后：RSSI 低于阈值丢弃；payload<25 字节丢弃；payload[0]!=0x07
+//     （非 AirPods continuity 类型）丢弃。
+//   - 解码：modelId = (payload[4]<<8)|payload[3]，查型号表得到设备名；
+//     左/右/盒电量从 payload[6]/payload[7] 的 4-bit nibble 取，按 payload[10]&2
+//     处理左右翻转；nibble→百分比（nib>=10→100，nib==15→-1 未知，其余 nib*10，
+//     AirPods Max 型号 +5）；充电状态从 payload[7] 高 nibble 判定。
+//
+// 共享 watcher 订阅在 readDevices() 首次调用时注册并保持；
+// readDevices() 返回“最近 N 秒内收到过广播”的设备快照。收到有意义的
+// 新广播时会同时通知 BatteryManager 定向刷新，无需等待下一个轮询周期。
+class AirPodsProvider : public IBatteryProvider
+{
+public:
+    AirPodsProvider();
+    ~AirPodsProvider() override;
+
+    std::wstring displayName() const override;
+    std::vector<BatteryDevice> readDevices() override;
+    void setChangeCallback(ChangeCallback callback) override;
+
+private:
+    // 单台 Apple 设备的最新解析结果（缓存）。
+    struct AdvDevice
+    {
+        std::wstring name;
+        uint16_t modelId = 0;
+        int leftPercent = -1;
+        int rightPercent = -1;
+        int casePercent = -1;
+        bool charging = false;
+        bool leftCharging = false;
+        bool rightCharging = false;
+        bool caseCharging = false;
+        bool paired = false;
+        short rssi = 0;
+        std::chrono::steady_clock::time_point lastSeen; // 最近一次收到广播的时间
+    };
+
+    // 注册共享 watcher 订阅（幂等）。
+    void ensureSubscribed();
+
+    // 广播接收回调（在 WinRT 线程池线程触发，经 SharedBleWatcher 分发）。
+    void onAdvertisementReceived(const SharedBleWatcher::Args &args);
+
+    // 更新广播快照，并在首次出现、状态变化或静默后重现时请求即时刷新。
+    void updateDevice(uint64_t address, AdvDevice device);
+
+    // 解析 Apple 厂商数据 payload，成功返回 true 并填充各电量 / 充电字段。
+    static bool parseApplePayload(const uint8_t *data, std::size_t len,
+                                  std::wstring &modelName, uint16_t &modelId,
+                                  int &left, int &right,
+                                  int &casePct, bool &charging, bool &leftCharging,
+                                  bool &rightCharging, bool &caseCharging);
+
+    // 蓝牙地址 -> 解析结果。由 watcher 回调线程写、readDevices() 读，需加锁。
+    std::map<uint64_t, AdvDevice> m_devices;
+    std::mutex m_mutex;
+    ChangeCallback m_changeCallback;
+
+    // 广播 RSSI 阈值（dBm）。readDevices() 每轮从 AppSettings 刷新，
+    // watcher 回调线程高频读取（不能每个广播都查 QSettings，故缓存为原子量）。
+    std::atomic<int> m_rssiThreshold{-70};
+
+    // SharedBleWatcher 订阅 id；0 表示未订阅。
+    std::uint64_t m_subscriptionId = 0;
+};

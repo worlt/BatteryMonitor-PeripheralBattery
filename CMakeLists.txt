@@ -1,0 +1,261 @@
+cmake_minimum_required(VERSION 3.25)
+if(NOT WIN32)
+    message(FATAL_ERROR "BatteryMonitor currently supports Windows only.")
+endif()
+project(BatteryMonitor VERSION 1.5 LANGUAGES CXX)
+
+include(GNUInstallDirs)
+if(MSVC)
+    # 随 cmake --install 收集 MSVC/UCRT 运行库，生成可独立分发的安装目录。
+    set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION ${CMAKE_INSTALL_BINDIR})
+    include(InstallRequiredSystemLibraries)
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(APP_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(APP_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(APP_VERSION_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(APP_VERSION_HEADER "${APP_VERSION_GENERATED_DIR}/GeneratedAppVersion.h")
+set(APP_VERSION_RC "${APP_VERSION_GENERATED_DIR}/app_version.rc")
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets Network WebSockets Sql LinguistTools)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+qt_standard_project_setup(I18N_SOURCE_LANGUAGE en)
+
+# ---------------------------------------------------------------------------
+# Windows SDK cppwinrt 头文件探测
+#
+# WinRT 头文件位置随 SDK 安装目录变化（默认 C:/Program Files (x86)/Windows Kits/10，
+# 本机实际在 D:/Windows Kits/10），因此动态探测，取最高版本下的 cppwinrt 目录。
+# ---------------------------------------------------------------------------
+file(GLOB _winrt_sdk_dirs
+    "$ENV{WindowsSdkDir}Include/*/cppwinrt"
+    "C:/Program Files (x86)/Windows Kits/10/Include/*/cppwinrt"
+    "C:/Program Files/Windows Kits/10/Include/*/cppwinrt"
+    "D:/Windows Kits/10/Include/*/cppwinrt")
+if(_winrt_sdk_dirs)
+    list(SORT _winrt_sdk_dirs ORDER DESCENDING)
+    list(GET _winrt_sdk_dirs 0 _winrt_include_dir)
+    message(STATUS "Using cppwinrt headers: ${_winrt_include_dir}")
+else()
+    message(FATAL_ERROR
+        "Windows SDK cppwinrt headers not found. "
+        "Please install the Windows SDK (e.g. 10.0.26100.0) with the "
+        "'Windows SDK for Desktop C++ Apps' component (cppwinrt).")
+endif()
+
+if(MSVC)
+    add_compile_options(/Zc:__cplusplus /utf-8 /permissive-)
+    add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+
+# 主 Qt 资源（图标等）单独用 qt_add_resources 编译。
+# 不要把 .qrc 和 Windows 的 .rc 混在同一个源列表里传给 qt_add_executable——
+# Qt6 的 AUTORCC 在这种混合列表下容易跳过对 .qrc 的处理，
+# 导致 :/icons/app.png 等运行时资源根本没进二进制（托盘显示空白）。
+set(APP_QRC_FILES
+    res/resources.qrc
+)
+
+# APP_RESOURCE_FILES 只放平台资源编译器（rc.exe）处理的对象，不含 Qt 的 .qrc。
+set(APP_RESOURCE_FILES)
+
+set(APP_PROVIDER_FILES
+    src/providers/bluetooth/S87ProWindowsBattery.cpp
+    src/providers/bluetooth/S87ProWindowsBattery.h
+    src/providers/bluetooth/BluetoothProvider.cpp
+    src/providers/bluetooth/BluetoothProvider.h
+    src/providers/bluetooth/ClassicBluetoothProvider.cpp
+    src/providers/bluetooth/ClassicBluetoothProvider.h
+    src/providers/bluetooth/SharedBleWatcher.cpp
+    src/providers/bluetooth/SharedBleWatcher.h
+    src/providers/bluetooth/AirPodsProvider.cpp
+    src/providers/bluetooth/AirPodsProvider.h
+    src/providers/bluetooth/XiaomiBudsProvider.cpp
+    src/providers/bluetooth/XiaomiBudsProvider.h
+    src/providers/xbox/XboxProvider.cpp
+    src/providers/xbox/XboxProvider.h
+    src/providers/xbox/FlydigiControllerReader.cpp
+    src/providers/xbox/FlydigiControllerReader.h
+    src/providers/system/SystemBatteryProvider.cpp
+    src/providers/system/SystemBatteryProvider.h
+    src/providers/hid/AulaHidProvider.cpp
+    src/providers/hid/AulaHidProvider.h
+    src/providers/hid/AsusRogHidProvider.cpp
+    src/providers/hid/AsusRogHidProvider.h
+    src/providers/hid/AsusMouseHidProvider.cpp
+    src/providers/hid/AsusMouseHidProvider.h
+    src/providers/hid/LogitechHidProvider.cpp
+    src/providers/hid/LogitechHidProvider.h
+    src/providers/hid/MchoseHidProvider.cpp
+    src/providers/hid/MchoseHidProvider.h
+    src/providers/hid/VgnHidProvider.cpp
+    src/providers/hid/VgnHidProvider.h
+    src/providers/hid/RazerHidProvider.cpp
+    src/providers/hid/RazerHidProvider.h
+)
+
+set_source_files_properties("${APP_VERSION_RC}" PROPERTIES GENERATED TRUE)
+list(APPEND APP_RESOURCE_FILES "${APP_VERSION_RC}")
+
+qt_add_executable(BatteryMonitor
+    WIN32
+    main.cpp
+    mainwindow.cpp
+    mainwindow.h
+    mainwindow.ui
+    # 核心抽象层（BatteryDevice / IBatteryProvider / BatteryManager）。
+    src/core/BatteryDevice.h
+    src/core/IBatteryProvider.h
+    src/core/BatteryManager.cpp
+    src/core/BatteryManager.h
+    # 电量历史持久化与自绘图表。
+    src/history/BatteryHistoryStore.cpp
+    src/history/BatteryHistoryStore.h
+    src/history/BatteryHistoryChart.cpp
+    src/history/BatteryHistoryChart.h
+    # WebSocket JSON-RPC Server（src/rpc/）。
+    src/rpc/DeviceJson.cpp
+    src/rpc/DeviceJson.h
+    src/rpc/JsonRpc.cpp
+    src/rpc/JsonRpc.h
+    src/rpc/RpcServer.cpp
+    src/rpc/RpcServer.h
+    # 具体 Provider 实现：按传输方式分目录，新增传输方式在此列表追加。
+    ${APP_PROVIDER_FILES}
+    util/AppSettings.cpp
+    util/AppSettings.h
+    util/DeviceSettings.cpp
+    util/DeviceSettings.h
+    util/Logger.cpp
+    util/Logger.h
+    ${APP_RESOURCE_FILES}
+)
+
+# 显式编译 Qt 资源（生成 qrc_resources.cpp 并链入 target），
+# 确保 :/icons/app.png 进入二进制。
+qt_add_resources(BatteryMonitor_BIG_RESOURCE_SOURCES
+    ${APP_QRC_FILES}
+)
+target_sources(BatteryMonitor PRIVATE ${BatteryMonitor_BIG_RESOURCE_SOURCES})
+
+add_custom_target(generate_app_version ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DAPP_VERSION_MAJOR=${APP_VERSION_MAJOR}
+        -DAPP_VERSION_MINOR=${APP_VERSION_MINOR}
+        -DAPP_VERSION_HEADER=${APP_VERSION_HEADER}
+        -DAPP_VERSION_HEADER_IN=${CMAKE_CURRENT_SOURCE_DIR}/util/GeneratedAppVersion.h.in
+        -DAPP_VERSION_RC=${APP_VERSION_RC}
+        -DAPP_VERSION_RC_IN=${CMAKE_CURRENT_SOURCE_DIR}/res/app.rc.in
+        -DAPP_ICON_PATH=${CMAKE_CURRENT_SOURCE_DIR}/res/icon.ico
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateVersion.cmake
+    BYPRODUCTS
+        "${APP_VERSION_HEADER}"
+        "${APP_VERSION_RC}"
+    DEPENDS
+        util/GeneratedAppVersion.h.in
+        res/app.rc.in
+        cmake/GenerateVersion.cmake
+        res/icon.ico
+    VERBATIM
+)
+add_dependencies(BatteryMonitor generate_app_version)
+
+target_include_directories(BatteryMonitor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(BatteryMonitor PRIVATE ${APP_VERSION_GENERATED_DIR})
+
+qt_add_translations(
+    TARGETS BatteryMonitor
+    TS_FILES lang/BatteryMonitor_zh_CN.ts
+    RESOURCE_PREFIX "/i18n"
+)
+
+target_link_libraries(BatteryMonitor
+    PRIVATE
+        Qt::Core
+        Qt::Widgets
+        Qt6::Network
+        Qt6::WebSockets
+        Qt6::Sql
+)
+
+target_include_directories(BatteryMonitor PRIVATE ${_winrt_include_dir})
+# windowsapp: WinRT (BluetoothProvider); XInput: Xbox 手柄;
+# setupapi: ClassicBluetoothProvider 的 SetupDi 调用;
+# shell32: SHGetKnownFolderPath (Logger 解析 %APPDATA%)。
+# hid: HidD_GetPreparsedData / HidP_GetCaps（AulaHidProvider 查询设备报告长度）。
+target_link_libraries(BatteryMonitor PRIVATE windowsapp XInput setupapi shell32 hid)
+target_compile_definitions(BatteryMonitor PRIVATE
+    $<$<CONFIG:Release>:WINRT_NO_SOURCE_LOCATION>)
+
+# —— hidapi（AulaHidProvider 读取 AULA 2.4G 键盘/鼠标电量）——
+# external/hidapi 内为预编译的 Windows 二进制（hidapi.dll/.lib/.h，v0.15.0）。
+set(HIDAPI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/external/hidapi)
+target_include_directories(BatteryMonitor PRIVATE ${HIDAPI_ROOT})
+target_link_libraries(BatteryMonitor PRIVATE ${HIDAPI_ROOT}/hidapi.lib)
+# 运行时需要 hidapi.dll 与 exe 同目录（bin/），编译后自动拷贝；同时把
+# 仓库 plugins/ 的完整目录结构同步到 exe 同级 plugins/。
+add_custom_command(TARGET BatteryMonitor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${HIDAPI_ROOT}/hidapi.dll
+            $<TARGET_FILE_DIR:BatteryMonitor>
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/plugins
+            $<TARGET_FILE_DIR:BatteryMonitor>/plugins
+    VERBATIM)
+
+# —— JS 插件（QuickJS 沙箱内运行的 .js 电量提供者，docs/js-plugin.md）——
+# HidProbe 使用 HidD_GetPreparsedData 查询报告长度。
+target_sources(BatteryMonitor PRIVATE
+    src/scripting/QuickjsEngine.cpp
+    src/scripting/QuickjsEngine.h
+    src/scripting/HidProbe.cpp
+    src/scripting/HidProbe.h
+    src/scripting/JsPluginProvider.cpp
+    src/scripting/JsPluginProvider.h
+    src/scripting/JsPluginLoader.cpp
+    src/scripting/JsPluginLoader.h
+    src/scripting/PluginUpdater.cpp
+    src/scripting/PluginUpdater.h
+)
+
+# —— quickjs-ng（src/scripting/ 的 JS 插件引擎）——
+# 上游 CMakeLists 会连带构建 qjs CLI / qjsc / 测试等无关目标，这里直接以
+# 源码方式编入其 4 个核心文件，只暴露 quickjs.h 引擎 API；不编 quickjs-libc，
+# 即不向 JS 侧注入 std/os 模块——插件只能使用宿主注册的 device API（沙箱边界
+# 的一部分，使用和安全说明见 docs/js-plugin.md）。
+enable_language(C)
+add_library(quickjs_core STATIC
+    external/quickjs/quickjs.c
+    external/quickjs/libregexp.c
+    external/quickjs/libunicode.c
+    external/quickjs/dtoa.c
+)
+# quickjs.c 使用 stdatomic，MSVC 需要 C11。
+set_target_properties(quickjs_core PROPERTIES C_STANDARD 11)
+target_include_directories(quickjs_core PUBLIC external/quickjs)
+target_compile_definitions(quickjs_core PRIVATE
+    _GNU_SOURCE WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601)
+target_link_libraries(BatteryMonitor PRIVATE quickjs_core)
+
+install(TARGETS BatteryMonitor
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES ${HIDAPI_ROOT}/hidapi.dll
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(DIRECTORY plugins/
+    DESTINATION ${CMAKE_INSTALL_BINDIR}/plugins
+)
+
+qt_generate_deploy_app_script(
+    TARGET BatteryMonitor
+    OUTPUT_SCRIPT deploy_script
+    NO_UNSUPPORTED_PLATFORM_ERROR
+)
+install(SCRIPT ${deploy_script})

@@ -1,0 +1,365 @@
+#include "AppSettings.h"
+
+#include <QSettings>
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QStringList>
+#include <windows.h>
+
+namespace
+{
+// 集中维护键名与默认值，避免拼写散落。
+constexpr auto kKeyRefreshInterval = "RefreshInterval";
+constexpr auto kKeyLanguage = "Language";
+constexpr auto kKeyTheme = "Theme";
+constexpr auto kKeyStaleRetentionSec = "StaleRetentionSec";
+constexpr auto kKeyHideUnpairedAirPods = "HideUnpairedAirPods";
+constexpr auto kKeyShowSystemBattery = "ShowSystemBattery";
+constexpr auto kKeyAirPodsRssiThreshold = "AirPodsRssiThreshold";
+constexpr auto kKeyXiaomiBudsRssiThreshold = "XiaomiBudsRssiThreshold";
+constexpr auto kKeyHistoryRetentionDays = "HistoryRetentionDays";
+constexpr auto kKeyWindowSize = "WindowSize";
+
+constexpr int kDefaultRefreshInterval = 10000;
+const QString kDefaultLanguage = QString();      // 空 = 跟随系统
+const QString kDefaultTheme = QStringLiteral("system");
+constexpr int kDefaultStaleRetentionSec = 180;   // 3 分钟
+constexpr bool kDefaultHideUnpairedAirPods = false;
+constexpr bool kDefaultShowSystemBattery = true;
+constexpr int kDefaultHistoryRetentionDays = 30;
+
+// —— JS 插件 ——
+constexpr auto kKeyPluginsEnabled = "plugins/enabled";
+const QString kKeyPluginDisabledPrefix = QStringLiteral("plugins/disabled/");
+constexpr bool kDefaultPluginsEnabled = true;
+} // namespace
+
+bool AppSettings::pluginsEnabled()
+{
+    return QSettings().value(kKeyPluginsEnabled, kDefaultPluginsEnabled).toBool();
+}
+
+void AppSettings::setPluginsEnabled(bool enabled)
+{
+    QSettings().setValue(kKeyPluginsEnabled, enabled);
+}
+
+bool AppSettings::pluginDisabled(const QString &pluginId)
+{
+    return QSettings().value(kKeyPluginDisabledPrefix + pluginId, false).toBool();
+}
+
+void AppSettings::setPluginDisabled(const QString &pluginId, bool disabled)
+{
+    QSettings().setValue(kKeyPluginDisabledPrefix + pluginId, disabled);
+}
+
+int AppSettings::refreshInterval()
+{
+    return QSettings().value(kKeyRefreshInterval, kDefaultRefreshInterval).toInt();
+}
+
+void AppSettings::setRefreshInterval(int msec)
+{
+    QSettings().setValue(kKeyRefreshInterval, msec);
+}
+
+QString AppSettings::language()
+{
+    return QSettings().value(kKeyLanguage, kDefaultLanguage).toString();
+}
+
+void AppSettings::setLanguage(const QString &code)
+{
+    QSettings().setValue(kKeyLanguage, code);
+}
+
+QString AppSettings::theme()
+{
+    return QSettings().value(kKeyTheme, kDefaultTheme).toString();
+}
+
+void AppSettings::setTheme(const QString &theme)
+{
+    QSettings().setValue(kKeyTheme, theme);
+}
+
+int AppSettings::staleRetentionSec()
+{
+    return QSettings().value(kKeyStaleRetentionSec, kDefaultStaleRetentionSec).toInt();
+}
+
+void AppSettings::setStaleRetentionSec(int sec)
+{
+    QSettings().setValue(kKeyStaleRetentionSec, sec);
+}
+
+bool AppSettings::hideUnpairedAirPods()
+{
+    return QSettings().value(kKeyHideUnpairedAirPods,
+                             kDefaultHideUnpairedAirPods).toBool();
+}
+
+void AppSettings::setHideUnpairedAirPods(bool hide)
+{
+    QSettings().setValue(kKeyHideUnpairedAirPods, hide);
+}
+
+bool AppSettings::showSystemBattery()
+{
+    return QSettings().value(kKeyShowSystemBattery,
+                             kDefaultShowSystemBattery).toBool();
+}
+
+void AppSettings::setShowSystemBattery(bool show)
+{
+    QSettings().setValue(kKeyShowSystemBattery, show);
+}
+
+int AppSettings::airPodsRssiThreshold()
+{
+    const int dBm = QSettings().value(kKeyAirPodsRssiThreshold,
+                                      kDefaultRssiThreshold).toInt();
+    if (dBm < kMinRssiThreshold || dBm > kMaxRssiThreshold) {
+        return kDefaultRssiThreshold;
+    }
+    return dBm;
+}
+
+void AppSettings::setAirPodsRssiThreshold(int dBm)
+{
+    QSettings().setValue(kKeyAirPodsRssiThreshold,
+                         qBound(kMinRssiThreshold, dBm, kMaxRssiThreshold));
+}
+
+int AppSettings::xiaomiBudsRssiThreshold()
+{
+    const int dBm = QSettings().value(kKeyXiaomiBudsRssiThreshold,
+                                      kDefaultRssiThreshold).toInt();
+    if (dBm < kMinRssiThreshold || dBm > kMaxRssiThreshold) {
+        return kDefaultRssiThreshold;
+    }
+    return dBm;
+}
+
+void AppSettings::setXiaomiBudsRssiThreshold(int dBm)
+{
+    QSettings().setValue(kKeyXiaomiBudsRssiThreshold,
+                         qBound(kMinRssiThreshold, dBm, kMaxRssiThreshold));
+}
+
+int AppSettings::historyRetentionDays()
+{
+    const int days = QSettings().value(kKeyHistoryRetentionDays,
+                                       kDefaultHistoryRetentionDays).toInt();
+    return days >= 0 ? days : kDefaultHistoryRetentionDays;
+}
+
+void AppSettings::setHistoryRetentionDays(int days)
+{
+    QSettings().setValue(kKeyHistoryRetentionDays, qMax(0, days));
+}
+
+QSize AppSettings::windowSize()
+{
+    const QSize size = QSettings().value(kKeyWindowSize).toSize();
+    return size.isValid() && !size.isEmpty() ? size : QSize();
+}
+
+void AppSettings::setWindowSize(const QSize &size)
+{
+    if (size.isValid() && !size.isEmpty()) {
+        QSettings().setValue(kKeyWindowSize, size);
+    }
+}
+
+// —— WebSocket JSON-RPC Server ——
+namespace
+{
+constexpr auto kKeyRpcEnabled = "RpcEnabled";
+constexpr auto kKeyRpcHost = "RpcHost";
+constexpr auto kKeyRpcPort = "RpcPort";
+constexpr auto kKeyRpcToken = "RpcToken";
+} // namespace
+
+bool AppSettings::rpcEnabled()
+{
+    return QSettings().value(kKeyRpcEnabled, kDefaultRpcEnabled).toBool();
+}
+
+void AppSettings::setRpcEnabled(bool enabled)
+{
+    QSettings().setValue(kKeyRpcEnabled, enabled);
+}
+
+QString AppSettings::rpcHost()
+{
+    return QSettings().value(kKeyRpcHost, QString::fromLatin1(kDefaultRpcHost))
+        .toString();
+}
+
+void AppSettings::setRpcHost(const QString &host)
+{
+    QSettings().setValue(kKeyRpcHost, host);
+}
+
+int AppSettings::rpcPort()
+{
+    const int port = QSettings().value(kKeyRpcPort, kDefaultRpcPort).toInt();
+    if (port < kMinRpcPort || port > kMaxRpcPort) {
+        return kDefaultRpcPort;
+    }
+    return port;
+}
+
+void AppSettings::setRpcPort(int port)
+{
+    QSettings().setValue(kKeyRpcPort, qBound(kMinRpcPort, port, kMaxRpcPort));
+}
+
+QString AppSettings::rpcToken()
+{
+    return QSettings().value(kKeyRpcToken).toString();
+}
+
+void AppSettings::setRpcToken(const QString &token)
+{
+    QSettings().setValue(kKeyRpcToken, token);
+}
+
+// —— 开机自启 ——
+//
+// Windows 上把自身路径写到 HKCU\Software\Microsoft\Windows\CurrentVersion\Run，
+// 由资源管理器在登录时拉起。HKCU 是当前用户级，无需管理员权限。
+// 值写成带引号的 exe 路径 + " --minimized"，开机后程序据此直接进托盘。
+//
+// 注意：命令行参数用程序自己解析的 "--minimized"（main.cpp），不依赖系统语义。
+namespace
+{
+// 自启在注册表里的值名（用 applicationName，默认 "BatteryMonitor"）。
+// 用 Qt 自身路径相关宏确保 Win64 / Win32 一致。
+constexpr auto kRunKeyPath =
+    R"(Software\Microsoft\Windows\CurrentVersion\Run)";
+constexpr auto kStartupApprovedRunKeyPath =
+    R"(Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run)";
+
+// 构造写到注册表的命令行："<exe 路径>" --minimized
+// exe 路径含空格时必须用双引号包起来，否则 explorer 解析会失败。
+QString autoStartCommand()
+{
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    return QStringLiteral("\"%1\" --minimized").arg(exe);
+}
+
+bool isStartupApprovedDisabled(const QString &valueName)
+{
+    HKEY key = nullptr;
+    const QString keyPath = QString::fromUtf8(kStartupApprovedRunKeyPath);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      reinterpret_cast<LPCWSTR>(keyPath.utf16()),
+                      0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    BYTE buffer[16] = {0};
+    DWORD bufferSize = sizeof(buffer);
+    DWORD type = 0;
+    const LSTATUS status = RegQueryValueExW(
+        key,
+        reinterpret_cast<LPCWSTR>(valueName.utf16()),
+        nullptr, &type,
+        buffer, &bufferSize);
+    RegCloseKey(key);
+
+    // Windows 任务管理器会在 StartupApproved\Run 中记录启停状态；
+    // 常见格式下首字节 0x03 表示禁用，0x02 表示启用。
+    return status == ERROR_SUCCESS
+        && type == REG_BINARY
+        && bufferSize > 0
+        && buffer[0] == 0x03;
+}
+
+void clearStartupApprovedState(const QString &valueName)
+{
+    HKEY key = nullptr;
+    const QString keyPath = QString::fromUtf8(kStartupApprovedRunKeyPath);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      reinterpret_cast<LPCWSTR>(keyPath.utf16()),
+                      0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return;
+    }
+    RegDeleteValueW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()));
+    RegCloseKey(key);
+}
+} // namespace
+
+bool AppSettings::startupAutoStart()
+{
+    const QString valueName = QCoreApplication::applicationName();
+
+    HKEY key = nullptr;
+    const QString keyPath = QString::fromUtf8(kRunKeyPath);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      reinterpret_cast<LPCWSTR>(keyPath.utf16()),
+                      0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    WCHAR buffer[MAX_PATH * 2] = {0};
+    DWORD bufferSize = sizeof(buffer);
+    DWORD type = 0;
+    const LSTATUS status = RegQueryValueExW(
+        key,
+        reinterpret_cast<LPCWSTR>(valueName.utf16()),
+        nullptr, &type,
+        reinterpret_cast<LPBYTE>(buffer), &bufferSize);
+    RegCloseKey(key);
+
+    if (status != ERROR_SUCCESS || type != REG_SZ) {
+        return false;
+    }
+    if (isStartupApprovedDisabled(valueName)) {
+        return false;
+    }
+    // 只要键存在且非空就视为启用（不严格匹配命令行内容，
+    // 这样用户从外部改过路径/参数也能正确显示为“已启用”）。
+    return bufferSize > sizeof(WCHAR); // 至少有一个非结束符的字符
+}
+
+bool AppSettings::setStartupAutoStart(bool enabled)
+{
+    HKEY key = nullptr;
+    const QString keyPath = QString::fromUtf8(kRunKeyPath);
+    const LSTATUS openStatus = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        reinterpret_cast<LPCWSTR>(keyPath.utf16()),
+        0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr);
+    if (openStatus != ERROR_SUCCESS) {
+        return false;
+    }
+
+    const QString valueName = QCoreApplication::applicationName();
+    LSTATUS status = ERROR_SUCCESS;
+    if (enabled) {
+        const QString cmd = autoStartCommand();
+        const auto cmdUtf16 = cmd.utf16();
+        const DWORD byteLen = static_cast<DWORD>((cmd.size() + 1) * sizeof(WCHAR));
+        status = RegSetValueExW(key,
+                                reinterpret_cast<LPCWSTR>(valueName.utf16()),
+                                0, REG_SZ,
+                                reinterpret_cast<const BYTE*>(cmdUtf16),
+                                byteLen);
+    } else {
+        status = RegDeleteValueW(key, reinterpret_cast<LPCWSTR>(valueName.utf16()));
+        if (status == ERROR_FILE_NOT_FOUND) {
+            status = ERROR_SUCCESS;
+        }
+    }
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS) {
+        return false;
+    }
+    clearStartupApprovedState(valueName);
+    return true;
+}

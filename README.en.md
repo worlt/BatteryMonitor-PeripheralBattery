@@ -1,0 +1,244 @@
+> This is an unofficial derivative of [JKWTCN/BatteryMonitor](https://github.com/JKWTCN/BatteryMonitor), originally authored by [JKWTCN](https://github.com/JKWTCN), maintained here by [worlt](https://github.com/worlt). The original MIT copyright and license are preserved in LICENSE. See README.md for this fork, README.upstream.en.md for the unmodified upstream documentation, and THIRD-PARTY-NOTICES.md for dependency licenses. Upstream validation does not imply that every device has been revalidated in this fork.
+
+# BatteryMonitor
+
+English | [简体中文](README.md)
+
+![1788878970188](image/README.en/1788878970188.png)
+
+![BatteryMonitor 系统托盘电量提示](image/README/1783349577055.png "BatteryMonitor tray")
+
+BatteryMonitor is a Windows desktop battery monitor for common wireless peripherals. It shows device battery status in a main window and in the system tray.
+
+The project is built with Qt 6 and CMake. It uses multiple providers to read battery information from Bluetooth devices, Xbox controllers, and HID 2.4G dongles, then presents them through a unified UI.
+
+## Important Notes
+
+> Flydigi controllers require the official Flydigi software and its drivers to be installed. Battery readings only require the `SpaceStationService` service to be running; the official Flydigi application does not need to be open.
+
+## Verified Devices
+
+Only the following devices have been tested so far:
+
+| Device Type                                                 | PID/VID                                                                                    | Verification Status |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------- |
+| Generic Bluetooth devices                                   | No fixed USB VID/PID; uses Windows Bluetooth device information                            | Verified            |
+| AULA F87ProV2D + AULA F87ProV2D Dongle                     | VID`0x0C45` / PID `0xFEFE`                                                             | Verified            |
+| AJAZZ MK87PRO + HS USB Dongle                               | VID`0x0C45` / PID `0xFEFC`                                                             | Verified            |
+| ATK V75X + ATK V75X Dongle                                  | VID`0x320F` / PID `0x5055` (USB), PID `0x5088` (dongle)                              | Verified            |
+| VGN DragonFly F2 Pro Max + Dongle                           | VGN MouseEnc protocol family; actual VID/PID depends on the device report                  | Verified            |
+| AirPods 2                                                   | Apple Company ID`0x004C` / Model ID `0x200F`                                           | Verified            |
+| Xbox controller                                             | VID`0x045E`; PID depends on the exact model                                              | Verified            |
+| Flydigi Direwolf 4 (wireless/XInput)                        | Service-reported VID`0x045E` / PID `0x028E`, model code `fp4`                        | Verified            |
+| Razer Basilisk X HyperSpeed + Dongle                        | VID`0x1532` / PID `0x0083`                                                             | Verified            |
+| Razer BlackWidow V4 Mini HyperSpeed (Wireless)              | VID`0x1532` / PID `0x02BA`                                                             | Verified            |
+| ROG Strix Scope RX TKL Wireless Deluxe + Dongle             | VID`0x0B05` / PID `0x1A07`                                                             | Verified            |
+| ROG Keris Wireless AimPoint                                 | VID`0x0B05` / PID `0x1A66` (wired) or `0x1A68` (2.4G)                                | Verified            |
+| Logitech MX Master 4 + Bolt receiver                        | VID`0x046D` / PID `0xC548`, HID++ 2.0 `0x1004`                                       | Verified            |
+| Razer Mouse Dock Pro + Razer Basilisk V3 Pro 35K (Wireless) | VID`0x1532` / PID `0x00A4` (dock) + PID `0x00CD` (mouse)                             | Verified            |
+| MCHOSE A7 V2 Pro (wired)                                    | VID`0x3837` / PID `0x4018`; precise battery percentage and charging state              | Verified            |
+| Redmi Buds 5 Pro                                            | Xiaomi BLE beacon (CompanyId`0x038F` / Service UUID `0xFD2D`); left/right/case battery | Verified            |
+
+## Theoretically Supported Devices
+
+Besides the verified devices above, the code also contains adapter logic for some devices in the same brand, protocol family, or VID/PID range. These devices are theoretically supported, but they have not been tested in the author's environment.
+
+| Device Type                                        | PID/VID                                                                                                                                                          | Verification Status     |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| AULA / AJAZZ 2.4G dongle devices                   | VID`0x0C45`, 2.4G dongle PID allowlist only                                                                                                                    | Theoretical, unverified |
+| VGN / related-brand 2.4G dongle keyboards and mice | Multiple VID/PID values, built-in protocol families and partial VID fallback matching                                                                            | Theoretical, unverified |
+| Razer mice / keyboards                             | VID`0x1532`, built-in PID table                                                                                                                                | Theoretical, unverified |
+| ASUS ROG / TUF mice                                | VID`0x0B05`; Chakram, Gladius, Harpe, Keris, Pugio, Spatha, Strix, TUF, and related models in the built-in PID table                                           | Theoretical, unverified |
+| Logitech HID++ 2.0 receiver devices                | Bolt / Unifying / Nano / Lightspeed; battery features`0x1004` / `0x1000` / `0x1001`                                                                        | Theoretical, unverified |
+| MCHOSE A7 V2 series mice                           | Wired VID`0x3837` / PID `0x4018`, `0x4019`, `0x4021`, or `0x4023`; 1K/8K dongle PID `0x100A` / `0x100B`; 8K MagDock VID`0x5253` / PID `0x1020` | Partially verified      |
+| AirPods / Beats series                             | Apple Company ID`0x004C`, built-in Model ID table                                                                                                              | Theoretical, unverified |
+| Xiaomi / Redmi Buds series earbuds                 | Xiaomi BLE beacon (CompanyId`0x038F` / Service UUID `0xFD2D`); Redmi Buds 5 Pro verified, other models theoretical                                           | Partially verified      |
+| Xbox / XInput / Windows game controllers           | Microsoft VID`0x045E` or Windows controller interfaces                                                                                                         | Theoretical, unverified |
+| Flydigi controller series                          | Apex, Vader, Direwolf, and other models recognized and reported by`SpaceStationService`; Direwolf 4 verified                                                   | Partially verified      |
+| Standard BLE Battery Service devices               | BLE GATT Battery Service, no fixed USB VID/PID                                                                                                                   | Theoretical, unverified |
+| Classic Bluetooth audio devices                    | Windows BTHENUM device property, no fixed USB VID/PID                                                                                                            | Theoretical, unverified |
+
+If your device can be detected and its battery can be read correctly, device model and test results are welcome. They can be added to the verified device list later.
+
+Note: AULA / AJAZZ wired USB keyboard bodies are not included in the current HID battery reading scope, even when they are visible through WebHID. The provider only reads battery data for devices behind a 2.4G dongle.
+
+## Features
+
+- Shows battery percentage or battery level
+- Shows the PC (laptop) battery percentage and charge/discharge power
+- System tray support
+- Per-device tray visibility setting
+- Opt-in low-battery notifications from the device list (off by default), with configurable thresholds and policies
+- Per-device alias
+- Stale battery cache for disconnected or temporarily unreadable devices
+- Option to hide unpaired AirPods / Beats / Xiaomi earbuds advertisements
+- Start with Windows and minimize to tray
+- Light, dark, and system theme modes
+- Chinese UI support
+- Sandboxed JavaScript plugins for adding HID devices without rebuilding the application
+- Built-in WebSocket JSON-RPC interface for external tools like StreamDock and Home Assistant to read device battery data
+- Per-device battery history charts with CSV export for the selected time range
+
+## Current Read Methods
+
+The project is split into several providers by device source:
+
+- `BluetoothProvider`: reads BLE GATT Battery Service / Windows battery information
+- `ClassicBluetoothProvider`: reads classic Bluetooth device battery from Windows device properties
+- `AirPodsProvider`: parses Apple Continuity BLE advertisements for AirPods / Beats left, right, and case battery levels
+- `XiaomiBudsProvider`: parses Xiaomi BLE advertisements for Xiaomi / Redmi Buds left, right, and case battery levels
+- `XboxProvider`: reads Xbox controller battery through XInput, RawGameController, and Windows device properties; reads the real battery level of Flydigi XInput-compatible controllers through the Flydigi Space Station `fcs.sock` local IPC
+- `SystemBatteryProvider`: reads the built-in (laptop) battery percentage and charge/discharge power through the WinRT aggregate battery, falling back to `GetSystemPowerStatus`; hidden on desktops without a battery
+- `AulaHidProvider`: reads AULA 2.4G dongle device battery through hidapi
+- `AsusRogHidProvider`: reads battery level and charging state from the ROG Strix Scope RX TKL Wireless Deluxe dongle through hidapi
+- `AsusMouseHidProvider`: reads battery level and charging state from ASUS ROG / TUF mice through hidapi
+- `LogitechHidProvider`: reads Logitech receiver-device battery and charging state through HID++ 2.0 Unified Battery, Battery Status, or Battery Voltage
+- `MchoseHidProvider`: reads precise battery percentage and charging state from MCHOSE A7 V2 series mice in wired, 1K/8K dongle, and 8K MagDock modes through hidapi; unsupported duplicate HID collections are skipped automatically
+- `VgnHidProvider`: reads VGN / related-brand 2.4G dongle device battery through hidapi
+- `RazerHidProvider`: reads Razer mouse / keyboard battery through hidapi
+- `JsPluginProvider`: recursively loads JavaScript plugins from `plugins` next to the executable and exposes a restricted HID API for private protocols
+
+## Requirements
+
+- Windows
+- Qt 6.5 or later
+- CMake 3.19 or later
+- MSVC toolchain with C++17 support
+- Windows SDK with Desktop C++ Apps / cppwinrt headers
+
+The `external/hidapi` directory contains the prebuilt Windows hidapi files used by this project. `hidapi.dll` is copied to the output directory after build.
+
+## Build
+
+Run the following commands in a shell where Qt and MSVC are configured:
+
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+The executable is generated by default at:
+
+```text
+bin/BatteryMonitor.exe
+```
+
+You can also open `CMakeLists.txt` directly with Qt Creator.
+
+## Usage
+
+After launch, the main window shows the currently detected devices. Closing the window does not exit the app; it keeps running in the system tray. Use the tray menu to quit completely.
+
+The **Reminder** column in the device list provides a shortcut for enabling low-battery notifications. Notifications are off by default for new devices and are only sent after the checkbox is selected.
+
+The scope of a reminder setting depends on the device source:
+
+- HID, Xbox, regular Bluetooth, and other non-advertisement devices store the setting independently by device ID.
+- Advertisement-based Bluetooth devices such as AirPods / Beats and Xiaomi earbuds share the setting by model. For example, enabling reminders for AirPods 2 applies to every detected AirPods 2, but not AirPods 4. The setting therefore remains effective when an unpaired device rotates its advertisement MAC address.
+
+Double-click a device to open its detail page and configure:
+
+- Device alias
+- Whether to show it in the tray
+- Whether to enable low battery notifications (off by default and synchronized with the list shortcut)
+- Low battery notification threshold
+- Low battery notification policy
+- Whether to keep the device cached forever
+
+The device details page also shows battery history for the last 24 hours, 7 days, 30 days,
+or all retained data. AirPods / Beats and Xiaomi earbuds use separate left, right, and case
+series. The CSV button exports the current device and selected time range.
+
+The settings page allows configuring:
+
+- Refresh interval
+- Language
+- Theme
+- Start with Windows
+- Stale cache retention time
+- Whether to hide unpaired earbuds advertisements (AirPods / Xiaomi)
+- Whether to show the system (PC) battery, on by default
+- WebSocket service toggle, listen port, bind address, and authentication token
+- Battery history retention (30 days by default, with a permanent option)
+
+History is stored in `battery-history.sqlite` under the user application-data directory.
+Changes are recorded immediately and stable readings receive a five-minute heartbeat.
+CSV files use UTF-8 and can be opened directly by Excel or analysis scripts.
+
+## JavaScript Plugins
+
+Devices whose battery is queried through HID output/input reports or feature reports can be added
+with JavaScript plugins, without modifying or rebuilding BatteryMonitor. At startup, the application
+recursively scans the `plugins` directory next to the executable. CMake automatically copies the
+repository's `plugins` directory to the output directory during a build.
+
+Plugins run in a restricted QuickJS sandbox without filesystem, network, or process access. They can
+still send packets to matching HID devices, so only trusted plugins should be used.
+
+For installation, plugin structure, host APIs, and debugging instructions, see the
+[JavaScript Plugin Guide](docs/js-plugin-en.md).
+
+## WebSocket API
+
+BatteryMonitor includes a built-in WebSocket JSON-RPC 2.0 server, disabled by default. Once enabled, external tools (such as StreamDock, Home Assistant, Rainmeter, or custom dashboards) can retrieve device battery snapshots, subscribe to real-time updates, trigger refreshes, and read/write global and per-device preferences via JSON-RPC.
+
+**Enabling the server:**
+
+- Toggle "WebSocket service" in the settings page (persisted, auto-restored on next launch). Port, bind address, and auth token can be configured on the same page.
+- Or start via command-line arguments (force-enabled for this session, not persisted):
+
+  ```text
+  BatteryMonitor.exe --websocket_server                  # uses the configured port, default 19211
+  BatteryMonitor.exe --websocket_server --port 8080      # overrides port for this session
+  BatteryMonitor.exe --minimized --websocket_server      # starts hidden to tray with the server
+  ```
+
+Listens on `ws://127.0.0.1:19211/` by default (localhost only, no auth required). For the full method list, data model, error codes, and interaction examples, see [docs/websocket-api-en.md](docs/websocket-api-en.md).
+
+A ready-to-use test page is also included at [docs/websocket-test.html](docs/websocket-test.html) — open it directly in a browser to connect to the server, call all methods, view real-time push and device details, with Chinese/English language switching.
+
+Companion StreamDock plugin: [JKWTCN/BatteryMonitorDock](https://github.com/JKWTCN/BatteryMonitorDock).
+
+## Project Structure
+
+```text
+.
+├── main.cpp                         # Application entry, provider registration, language/theme setup
+├── mainwindow.cpp / mainwindow.h     # Main window, tray, settings page, device detail page
+├── src/core                         # Device model, provider interface, BatteryManager aggregation logic
+├── src/providers/bluetooth          # Bluetooth / AirPods providers
+├── src/providers/hid                # AULA / ASUS / Logitech / MCHOSE / VGN / Razer HID providers
+├── src/providers/xbox               # Xbox provider
+├── src/providers/system             # Built-in PC battery provider
+├── src/rpc                          # WebSocket JSON-RPC server
+├── src/scripting                    # QuickJS sandbox, HID bridge, and JavaScript plugin loader
+├── plugins                          # JavaScript device plugins copied during the build
+├── docs                             # JavaScript plugin and WebSocket API documentation
+├── util                             # Settings, logging, version information
+├── lang                             # Qt translation files
+├── res                              # Icons and Qt resources
+└── external/hidapi                  # Prebuilt hidapi Windows dependency
+```
+
+## Device Adaptation
+
+To add support for a new device, you usually need to add or extend the corresponding provider:
+
+- Standard Bluetooth battery devices: start with `BluetoothProvider`
+- Classic Bluetooth audio devices: start with `ClassicBluetoothProvider`
+- Apple audio devices: start with `AirPodsProvider`
+- Xiaomi / Redmi earbuds: start with `XiaomiBudsProvider`
+- XInput / Windows game controllers: start with `XboxProvider`
+- For 2.4G dongles or private HID protocols, prefer a JavaScript plugin; see the
+  [JavaScript Plugin Guide](docs/js-plugin-en.md)
+- Extend a native provider under `src/providers/hid` only when the JavaScript API cannot express the protocol
+
+After adding a provider, register it in `main.cpp` with `BatteryManager` to reuse the existing UI, tray, low battery notification, and cache logic.
+
+## Special Thanks
+
+Thanks to the [hidapi](https://github.com/libusb/hidapi) project. This project uses hidapi to communicate with Windows HID devices for battery reading.
+
+## License
+
+This project is open-sourced under the MIT License. See [LICENSE](LICENSE).

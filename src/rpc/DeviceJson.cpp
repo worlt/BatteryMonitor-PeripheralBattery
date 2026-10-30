@@ -1,0 +1,130 @@
+#include "DeviceJson.h"
+
+#include "util/DeviceSettings.h"
+
+#include <QJsonArray>
+
+namespace
+{
+// -1 是"未知"哨兵；序列化时映射为 JSON null，避免与 0% 混淆。
+QJsonValue percentValue(int value)
+{
+    return value < 0 ? QJsonValue::Null : QJsonValue(value);
+}
+} // namespace
+
+namespace DeviceJson
+{
+QJsonObject toJson(const BatteryDevice &device)
+{
+    const QString idQ = QString::fromStdWString(device.id);
+    const QString nameQ = QString::fromStdWString(device.name);
+    // 设备级 alias 来自 DeviceSettings；为空时 displayName 回退到 name。
+    const QString aliasQ = DeviceSettings::alias(idQ);
+    const QString displayQ = aliasQ.isEmpty() ? nameQ : aliasQ;
+
+    QJsonObject o;
+    o["id"] = idQ;
+    o["name"] = nameQ;
+    o["alias"] = aliasQ;
+    o["displayName"] = displayQ;
+    o["type"] = typeToString(device.type);
+    o["subType"] = subTypeToString(device.subType);
+    o["percentage"] = percentValue(device.percentage);
+    o["level"] = levelToString(device.level);
+    o["leftPercent"] = percentValue(device.leftPercent);
+    o["rightPercent"] = percentValue(device.rightPercent);
+    o["casePercent"] = percentValue(device.casePercent);
+    o["charging"] = device.charging;
+    o["leftCharging"] = device.leftCharging;
+    o["rightCharging"] = device.rightCharging;
+    o["caseCharging"] = device.caseCharging;
+    o["paired"] = device.paired;
+    // 本机电池的瞬时充放电功率（mW，正 = 放电，负 = 充电，0 = 未知/空闲）。
+    // 仅 System 设备有意义；进 signature 使订阅端拿到实时功率变化。
+    o["rateMilliwatts"] = device.rateMilliwatts;
+    // 广播类设备的信号强度（dBm）；0 = 未上报，序列化为 null。
+    // 刻意不进 signature()：逐轮波动会破坏变化去重。
+    o["rssi"] = device.rssi < 0 ? QJsonValue(device.rssi) : QJsonValue::Null;
+    o["wired"] = device.wired;
+    // 本机电池是否接入外部电源（交流适配器）；其余类型恒为 false。
+    o["externalPower"] = device.externalPower;
+    o["connected"] = device.connected;
+    o["stale"] = device.stale;
+    o["lastSeen"] = device.lastSeenMsecs;
+    return o;
+}
+
+QJsonObject listToJson(const QList<BatteryDevice> &devices, qint64 updatedAtMs)
+{
+    QJsonArray arr;
+    for (const auto &d : devices) {
+        arr.append(toJson(d));
+    }
+    QJsonObject o;
+    o["devices"] = arr;
+    o["updatedAt"] = updatedAtMs;
+    o["count"] = devices.size();
+    return o;
+}
+
+QString signature(const BatteryDevice &device)
+{
+    // 仅纳入"客户端可见且会影响展示/判断"的字段。
+    // 刻意排除 lastSeenMsecs（每轮都变，会破坏去重）。
+    // 含 rateMilliwatts：订阅端（StreamDock 等）需要实时感知功率变化。
+    return QString("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19")
+        .arg(QString::fromStdWString(device.id))
+        .arg(QString::fromStdWString(device.name))
+        .arg(static_cast<int>(device.type))
+        .arg(static_cast<int>(device.subType))
+        .arg(device.percentage)
+        .arg(static_cast<int>(device.level))
+        .arg(device.leftPercent)
+        .arg(device.rightPercent)
+        .arg(device.casePercent)
+        .arg(device.charging ? 1 : 0)
+        .arg(device.paired ? 1 : 0)
+        .arg(device.wired ? 1 : 0)
+        .arg(device.connected ? 1 : 0)
+        .arg(device.stale ? 1 : 0)
+        .arg(device.leftCharging ? 1 : 0)
+        .arg(device.rightCharging ? 1 : 0)
+        .arg(device.caseCharging ? 1 : 0)
+        .arg(device.rateMilliwatts)
+        .arg(device.externalPower ? 1 : 0);
+}
+
+QString levelToString(BatteryLevel level)
+{
+    switch (level) {
+    case BatteryLevel::Empty:  return QStringLiteral("empty");
+    case BatteryLevel::Low:    return QStringLiteral("low");
+    case BatteryLevel::Medium: return QStringLiteral("medium");
+    case BatteryLevel::Full:   return QStringLiteral("full");
+    case BatteryLevel::Unknown:
+    default:                   return QStringLiteral("unknown");
+    }
+}
+
+QString typeToString(BatteryDevice::Type type)
+{
+    switch (type) {
+    case BatteryDevice::Type::Xbox:  return QStringLiteral("xbox");
+    case BatteryDevice::Type::Hid:   return QStringLiteral("hid");
+    case BatteryDevice::Type::System: return QStringLiteral("system");
+    case BatteryDevice::Type::Bluetooth:
+    default:                         return QStringLiteral("bluetooth");
+    }
+}
+
+QString subTypeToString(BatteryDevice::SubType subType)
+{
+    switch (subType) {
+    case BatteryDevice::SubType::AirPods:   return QStringLiteral("airpods");
+    case BatteryDevice::SubType::XiaomiBuds: return QStringLiteral("xiaomi_buds");
+    case BatteryDevice::SubType::Generic:
+    default:                                return QStringLiteral("generic");
+    }
+}
+} // namespace DeviceJson
