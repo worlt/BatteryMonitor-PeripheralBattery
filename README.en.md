@@ -4,6 +4,17 @@
 
 English | [简体中文](README.md)
 
+## Fork release: v1.5.0-peripheral.2
+
+Download the `win-x64-portable.zip` asset from this repository's Releases, extract the entire archive, and run `bin/BatteryMonitor.exe` on Windows 10/11 x64. No additional peripheral driver is needed for these two adaptations.
+
+- GM3323D now accepts both observed charging and discharging input reports, preventing the mouse from disappearing while charging. Battery percentage remains an uncalibrated approximation in 10% steps.
+- S87Pro Bluetooth charging is still unknown to the tested readers. Device details offer an optional **Manually mark as charging** checkbox, off by default. It shows **Charging (manual)** and a lightning icon; clear it after unplugging. The preference persists per device and resumes after reconnecting, but is not shown as live charging while disconnected or stale.
+- Windows PnP remains the preferred S87Pro battery source, with GATT fallback. Both percentage-only paths report charging as unknown. Hardware-reported charging always takes precedence over manual annotations.
+- WebSocket device objects retain `charging` and add `chargingKnown` and `chargingSource` (`device`, `manual`, or `unknown`). See [API documentation](docs/websocket-api-en.md).
+
+Validation covers one mouse and keyboard, report parsing, charging provenance, and isolated settings. Full discharge calibration, prolonged sleep/resume, and S87Pro USB/2.4G charging support remain unverified. The upstream device list below is retained for reference and has not been fully retested by this fork.
+
 ![1788878970188](image/README.en/1788878970188.png)
 
 ![BatteryMonitor 系统托盘电量提示](image/README/1783349577055.png "BatteryMonitor tray")

@@ -1,4 +1,5 @@
 #include "BatteryManager.h"
+#include "ChargingState.h"
 #include "util/AppSettings.h"
 #include "util/DeviceSettings.h"
 #include "util/Logger.h"
@@ -121,6 +122,8 @@ std::wstring BatteryManager::deviceSignature(const BatteryDevice &d)
        << d.rightPercent << L'|'
        << d.casePercent << L'|'
        << (d.charging ? 1 : 0) << L'|'
+       << (d.chargingKnown ? 1 : 0) << L'|'
+       << (d.chargingManual ? 1 : 0) << L'|'
        << (d.leftCharging ? 1 : 0) << L'|'
        << (d.rightCharging ? 1 : 0) << L'|'
        << (d.caseCharging ? 1 : 0) << L'|'
@@ -356,6 +359,11 @@ void BatteryManager::publishCurrentDevices(const QSet<std::wstring> &freshIds)
     // 与粘性缓存合并：刚返回的 provider 读到的设备刷新时间戳；
     // 当前聚合快照里没有的旧设备按保留窗口以 stale=true 补回。
     applyStickyCache(raw, freshIds);
+
+    // Keep provider and sticky-cache state untouched; overrides are annotations.
+    for (auto &device : raw) {
+        applyManualCharging(device, DeviceSettings::manualCharging(QString::fromStdWString(device.id)));
+    }
 
     // 变化检测：只有设备集合 / 电量 / 连接状态发生变化时才写一条 INFO 摘要。
     logSummaryIfChanged(raw);

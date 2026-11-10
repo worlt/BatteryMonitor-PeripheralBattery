@@ -8,6 +8,7 @@ int wmain(int count, wchar_t **arguments)
     const int expected = std::stoi(arguments[2]);
     const auto reading = readS87ProWindowsBattery(L"AULA-S87Pro-1", deviceId);
     if (!reading || reading->percentage != expected || !reading->connected || reading->id != deviceId) return 2;
+    if (reading->chargingKnown || reading->charging || reading->chargingManual) return 6;
     if (readS87ProWindowsBattery(L"Different keyboard", deviceId)) return 3;
     if (readS87ProWindowsBattery(L"AULA-S87Pro-1", L"BluetoothLE#BluetoothLE00:00:00:00:00:01-00:00:00:00:00:02")) return 4;
     if (readS87ProWindowsBattery(L"AULA-S87Pro-2", deviceId)) return 5;

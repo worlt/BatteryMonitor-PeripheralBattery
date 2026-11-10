@@ -138,5 +138,8 @@ std::optional<BatteryDevice> readS87ProWindowsBattery(const std::wstring &name, 
     result.level = result.percentage >= 80 ? BatteryLevel::Full : result.percentage >= 50 ? BatteryLevel::Medium :
                    result.percentage >= 20 ? BatteryLevel::Low : BatteryLevel::Empty;
     result.connected = true;
+    // This Windows property path provides a percentage only. The observed
+    // S87Pro Battery Service exposes 2A19, but no charging-status characteristic.
+    result.chargingKnown = false;
     return result;
 }

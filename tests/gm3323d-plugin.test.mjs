@@ -23,14 +23,24 @@ device.usagePage = () => 11;
 assert.equal(plugin.GetBattery(), null);
 assert.equal(reads, 0);
 device.usagePage = () => 10;
-for (const [raw, expected] of [[0, 0], [8, 80], [9, 90], [10, 100]]) {
-    queue = [[3, 0, 64, 1, raw]];
-    const result = plugin.GetBattery();
-    assert.equal(result.percentage, expected);
-    assert.equal(result.charging, undefined);
-    assert.match(result.name, /约数/);
+// The charging capture was 03 01 40 01 0a. Both observed power
+// states must survive parsing, across all supported 10% battery steps.
+for (const powerState of [1, 0]) {
+    for (let step = 0; step <= 10; step++) {
+        queue = [[3, powerState, 64, 1, step]];
+        const result = plugin.GetBattery();
+        assert.ok(result, `power=${powerState}, step=${step} must remain visible`);
+        assert.equal(result.percentage, step * 10);
+        assert.equal(result.charging, powerState === 1);
+        assert.equal(result.wired, undefined); // Charging does not identify the data transport.
+        assert.match(result.name, /约数/);
+    }
 }
-for (const invalid of [[3, 0, 64, 1, 11], [3, 0, 64, 1, 99], [3, 1, 64, 1, 8], [3, 0, 65, 1, 8], [4, 0, 64, 1, 8], [3, 0, 64, 1], [3, 0, 64, 1, 8, 0]]) {
+queue = [new Uint8Array([3, 1, 64, 1, 10])];
+assert.equal(plugin.GetBattery().charging, true);
+queue = [[3, 2, 64, 1, 8], [3, 1, 64, 1, 8]];
+assert.equal(plugin.GetBattery().percentage, 80); // Skip malformed reports, not charging reports.
+for (const invalid of [[3, 0, 64, 1, 11], [3, 0, 64, 1, 99], [3, 2, 64, 1, 8], [3, 255, 64, 1, 8], [3, 0, 65, 1, 8], [3, 0, 64, 0, 8], [3, 0, 64, 1, 1.5], [4, 0, 64, 1, 8], [3, 0, 64, 1], [3, 0, 64, 1, 8, 0]]) {
     queue = [invalid];
     assert.equal(plugin.GetBattery(), null);
 }
@@ -40,4 +50,4 @@ assert.equal(plugin.GetBattery(), null);
 assert.equal(reads, 8);
 device.read = () => { throw new Error("unplugged"); };
 assert.equal(plugin.GetBattery(), null);
-console.log("PASS: JS identity, read-only, report parsing, timeouts and unplug handling");
+console.log("PASS: JS identity, read-only, charging/discharging steps, report validation, timeouts and unplug handling");

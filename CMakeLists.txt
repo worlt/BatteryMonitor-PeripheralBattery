@@ -110,6 +110,7 @@ qt_add_executable(BatteryMonitor
     mainwindow.ui
     # 核心抽象层（BatteryDevice / IBatteryProvider / BatteryManager）。
     src/core/BatteryDevice.h
+    src/core/ChargingState.h
     src/core/IBatteryProvider.h
     src/core/BatteryManager.cpp
     src/core/BatteryManager.h
@@ -259,3 +260,28 @@ qt_generate_deploy_app_script(
     NO_UNSUPPORTED_PLATFORM_ERROR
 )
 install(SCRIPT ${deploy_script})
+
+# Opt-in, isolated regression tests; hardware probe is built but not run by CTest.
+option(BATTERYMONITOR_BUILD_TESTS "Build charging regression tests and S87Pro hardware probe" OFF)
+if(BATTERYMONITOR_BUILD_TESTS)
+    enable_testing()
+    add_executable(charging-state-test
+        tests/charging-state-test.cpp
+        src/rpc/DeviceJson.cpp
+        util/DeviceSettings.cpp)
+    target_include_directories(charging-state-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(charging-state-test PRIVATE Qt6::Core)
+    add_executable(s87pro-windows-test
+        tests/s87pro-windows-test.cpp
+        src/providers/bluetooth/S87ProWindowsBattery.cpp)
+    target_include_directories(s87pro-windows-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(s87pro-windows-test PRIVATE Qt6::Core setupapi)
+    set_target_properties(charging-state-test s87pro-windows-test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    add_test(NAME charging-state COMMAND charging-state-test)
+    find_program(NODE_EXECUTABLE NAMES node node.exe)
+    if(NODE_EXECUTABLE)
+        add_test(NAME gm3323d-plugin
+            COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gm3323d-plugin.test.mjs")
+    endif()
+endif()

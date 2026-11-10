@@ -206,3 +206,13 @@ void DeviceSettings::setKeepCachedForever(const QString &deviceId, bool keep)
     }
     QSettings().setValue(prefixFor(deviceId) + kKeyKeepCachedForever, keep);
 }
+
+// Separate per-device preference: no changes to tray/alert/alias keys.
+bool DeviceSettings::manualCharging(const QString &deviceId)
+{
+    return !deviceId.isEmpty() && QSettings().value(prefixFor(deviceId) + "ManualCharging", false).toBool();
+}
+void DeviceSettings::setManualCharging(const QString &deviceId, bool enabled)
+{
+    if (!deviceId.isEmpty()) QSettings().setValue(prefixFor(deviceId) + "ManualCharging", enabled);
+}

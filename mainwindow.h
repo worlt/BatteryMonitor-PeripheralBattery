@@ -202,6 +202,8 @@ private:
     QSpinBox *m_deviceThresholdSpin = nullptr;
     QComboBox *m_deviceAlertPolicyCombo = nullptr;
     QCheckBox *m_deviceKeepCacheCheck = nullptr;
+    QLabel *m_deviceManualChargingRowTitle = nullptr;
+    QCheckBox *m_deviceManualChargingCheck = nullptr;
 
     // —— 设备详情页历史图表 ——
     QFrame *m_historyGroup = nullptr;

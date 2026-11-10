@@ -560,4 +560,12 @@
     <message><source>Cannot install the plugin update: %1. Check write permissions and file locks.</source><translation>无法安装插件更新：%1。请检查写入权限以及文件是否被占用。</translation></message>
     <message><source>Some files could not be restored. Backups are in: %1</source><translation>部分文件无法恢复，备份保存在：%1</translation></message>
 </context>
+<context>
+    <name>MainWindow</name>
+    <message><source>Charging (manual)</source><translation>正在充电（手动标记）</translation></message>
+    <message><source>Connected (charging unknown)</source><translation>已连接（充电未知）</translation></message>
+    <message><source>Charging status</source><translation>充电状态</translation></message>
+    <message><source>Manually mark as charging</source><translation>手动标记正在充电</translation></message>
+    <message><source>This device does not report charging. This is a manual label, not automatic detection. Clear it after unplugging.</source><translation>此设备未上报充电状态。这是手动标记，并非自动检测；拔下充电线后请取消勾选。</translation></message>
+</context>
 </TS>

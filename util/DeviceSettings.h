@@ -70,6 +70,11 @@ public:
     static bool keepCachedForever(const QString &deviceId);
     static void setKeepCachedForever(const QString &deviceId, bool keep);
 
+    // User annotation for devices that do not report charging. Default off;
+    // clear it after unplugging. Never overrides a hardware-reported state.
+    static bool manualCharging(const QString &deviceId);
+    static void setManualCharging(const QString &deviceId, bool enabled);
+
     // 默认值常量，供 UI 回填与判断时引用。
     static constexpr bool kDefaultTrayVisible = false;
     static constexpr bool kDefaultAlertEnabled = false;

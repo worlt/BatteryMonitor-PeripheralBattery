@@ -80,6 +80,10 @@ struct BatteryDevice
     int casePercent = -1;
     // 任一路正在充电即置 true（三路电量路径填写）。
     bool charging = false;
+    // Whether the provider actually reports charging; false is not "not charging".
+    bool chargingKnown = true;
+    // Explicit user annotation; never represented as a device-reported signal.
+    bool chargingManual = false;
     // —— 三路充电粒度（仅 isThreeChannelAudio(subType) 时有意义）——
     // 左耳 / 右耳 / 充电盒各自是否正在充电；charging 恒等于三者之或，
     // 保留单一布尔是为排序 / 提醒 / RPC 兼容。
@@ -138,7 +142,8 @@ inline bool sameDisplayContent(const BatteryDevice &a, const BatteryDevice &b)
            a.subType == b.subType && a.percentage == b.percentage &&
            a.level == b.level && a.leftPercent == b.leftPercent &&
            a.rightPercent == b.rightPercent && a.casePercent == b.casePercent &&
-           a.charging == b.charging && a.leftCharging == b.leftCharging &&
+           a.charging == b.charging && a.chargingKnown == b.chargingKnown &&
+           a.chargingManual == b.chargingManual && a.leftCharging == b.leftCharging &&
            a.rightCharging == b.rightCharging && a.caseCharging == b.caseCharging &&
            a.paired == b.paired && a.rateMilliwatts == b.rateMilliwatts &&
            a.externalPower == b.externalPower && a.wired == b.wired &&

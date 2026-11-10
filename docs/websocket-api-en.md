@@ -124,6 +124,8 @@ Maps to the C++ `BatteryDevice` struct (`src/core/BatteryDevice.h`). This is the
 | `rightPercent` | number\|null | Right bud battery. |
 | `casePercent` | number\|null | Charging case battery. |
 | `charging` | boolean | Whether charging (any bud charging → `true`; set by triple-battery paths). |
+| `chargingKnown` | boolean | Whether the current reader provides charging status. When false, `charging=false` does not confirm that charging has stopped. |
+| `chargingSource` | string | `device`: provider state; `manual`: explicit user annotation; `unknown`: no charging state from the reader. Manual annotation keeps `chargingKnown=false`. |
 | `leftCharging` | boolean | Whether the left bud is charging. Only meaningful for triple-battery subtypes. |
 | `rightCharging` | boolean | Whether the right bud is charging. |
 | `caseCharging` | boolean | Whether the charging case is charging. |

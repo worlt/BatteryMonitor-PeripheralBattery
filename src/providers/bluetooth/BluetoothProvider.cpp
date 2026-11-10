@@ -480,6 +480,9 @@ std::vector<BatteryDevice> BluetoothProvider::readDevices()
                     device.name = std::move(name);
                     device.type = BatteryDevice::Type::Bluetooth;
                     device.percentage = *percentage;
+                    // Battery Level (2A19) does not report charging, including
+                    // the S87Pro fallback when Windows PnP is unavailable.
+                    device.chargingKnown = false;
                     device.level = levelFromPercentage(*percentage);
                     device.connected = true;
                     devices.push_back(std::move(device));

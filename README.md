@@ -6,11 +6,11 @@
 
 - 上游固定基线：[`50f628c1ae1ced004e9fa03737cee9d6a561d80e`](https://github.com/JKWTCN/BatteryMonitor/tree/50f628c1ae1ced004e9fa03737cee9d6a561d80e)。
 - 保留原说明：[中文上游 README](README.upstream.md)、[英文上游 README](README.upstream.en.md)。上游已验证设备列表不等于本分支重新验证过全部设备。
-- 发布标识：`v1.5.0-peripheral.1`；程序内部仍沿用上游版本编号格式。请以本分支 Release 标识和 SHA256 区分，不要仅看 EXE 内部版本号。
+- 发布标识：`v1.5.0-peripheral.2`；程序内部仍沿用上游版本编号格式。请以本分支 Release 标识和 SHA256 区分，不要仅看 EXE 内部版本号。
 
 ## 下载与使用
 
-在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.1-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
+在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.2-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
 
 `dist/` 不进入 Git；运行包、源码包、插件包和校验文件只作为 Release 附件。具体打包与上传步骤见 [发布指南](docs/fork/RELEASE.md)。源码构建见 [构建指南](docs/fork/BUILD.md)。
 
@@ -18,10 +18,14 @@
 
 | 设备 | 本分支读取方式 | 已验证范围与限制 |
 | --- | --- | --- |
-| 戴记 GM3323D，VID `1D57` / PID `FA60` | 指定纯输入 HID 集合，5 字节报告末尾档位 × 10 | 单台设备读到 `08`/`09`；显示约 80%/90%。映射未完成充放电校准，不是精确百分比，不推断充电状态 |
-| 狼蛛 AULA S87Pro | 蓝牙设备名称、地址与 ContainerId 匹配后，优先读 Windows PnP 电量属性；不可用时回退原 GATT 路径 | 单台设备验证。Windows 属性属于系统/驱动缓存；不是强制实时读取，不保证永远与键盘显示屏一致。未验证 2.4G/USB 模式 |
+| 戴记 GM3323D，VID `1D57` / PID `FA60` | 指定纯输入 HID 集合，5 字节报告末尾档位 × 10；解析充电标志 | 修复充电报告被丢弃导致鼠标消失；单台设备观察到充电和放电报告。电量仍为未校准的 10% 档位约数 |
+| 狼蛛 AULA S87Pro | 蓝牙设备名称、地址与 ContainerId 匹配后，优先读 Windows PnP 电量属性；不可用时回退 GATT | 自动充电状态仍不可用，显示“已连接（充电未知）”，可手动标记。Windows 电量可能缓存，不保证与键盘显示屏一致；未验证 2.4G/USB |
 
-验证时 S87Pro 的 Windows 属性为 99%，GATT 的 Cached/Uncached 均为 94%；99% 没有写死，也不能据此证明哪条来源绝对准确。未完成物理拔插、长期休眠恢复和全程放电测试。
+S87Pro 在充电、拔线、重新插线的蓝牙采样中，未找到可靠的自动充电判据。键盘屏幕显示充电并不保证该状态会传给电脑。Windows 与 GATT 电量可能不同，程序没有硬编码电量；长期休眠恢复和全程充放电校准仍未完成。
+
+### 手动标记键盘充电
+
+打开设备详情，在“充电状态”中勾选“手动标记正在充电”，会显示闪电和“正在充电（手动标记）”。此项默认关闭、按设备保存，仅用于充电状态未知的来源；拔掉充电线后需要自己取消。设备断开或数据过期时不显示实时充电标记，重新连接后会恢复已保存的选择。它不改变电量，也不覆盖设备已上报的充电状态。
 
 README 中上游已验证的 **F87ProV2D + Dongle** 是特定型号的 2.4G HID 路径，不等于所有 AULA 型号和蓝牙模式都得到相同验证。
 

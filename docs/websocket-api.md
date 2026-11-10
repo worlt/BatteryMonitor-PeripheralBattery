@@ -124,6 +124,8 @@ Server **默认关闭**，可通过以下任一方式启用：
 | `rightPercent` | number\|null | 右耳电量。                                                                                                                                  |
 | `casePercent`  | number\|null | 充电盒电量。                                                                                                                                |
 | `charging`     | boolean      | 是否正在充电（任一路充电即`true`，三路电量路径会置 `true`）。                                                                            |
+| `chargingKnown` | boolean | 当前读取路径是否提供充电状态。`false` 时不能将 `charging=false` 理解为确认未充电。 |
+| `chargingSource` | string | `device`：沿用设备来源；`manual`：用户手动标记；`unknown`：读取路径无充电状态。手动标记不改变 `chargingKnown=false`。 |
 | `leftCharging` | boolean      | 左耳是否正在充电。仅 `subType=="airpods"` / `"xiaomi_buds"` 有意义。                                                                            |
 | `rightCharging`| boolean      | 右耳是否正在充电。                                                                                                                              |
 | `caseCharging` | boolean      | 充电盒是否正在充电。                                                                                                                            |

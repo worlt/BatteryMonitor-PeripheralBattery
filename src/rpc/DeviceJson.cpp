@@ -1,4 +1,5 @@
 #include "DeviceJson.h"
+#include "src/core/ChargingState.h"
 
 #include "util/DeviceSettings.h"
 
@@ -36,6 +37,8 @@ QJsonObject toJson(const BatteryDevice &device)
     o["rightPercent"] = percentValue(device.rightPercent);
     o["casePercent"] = percentValue(device.casePercent);
     o["charging"] = device.charging;
+    o["chargingKnown"] = device.chargingKnown;
+    o["chargingSource"] = chargingSource(device);
     o["leftCharging"] = device.leftCharging;
     o["rightCharging"] = device.rightCharging;
     o["caseCharging"] = device.caseCharging;
@@ -73,7 +76,7 @@ QString signature(const BatteryDevice &device)
     // 仅纳入"客户端可见且会影响展示/判断"的字段。
     // 刻意排除 lastSeenMsecs（每轮都变，会破坏去重）。
     // 含 rateMilliwatts：订阅端（StreamDock 等）需要实时感知功率变化。
-    return QString("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19")
+    return QString("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%20|%21")
         .arg(QString::fromStdWString(device.id))
         .arg(QString::fromStdWString(device.name))
         .arg(static_cast<int>(device.type))
@@ -92,7 +95,9 @@ QString signature(const BatteryDevice &device)
         .arg(device.rightCharging ? 1 : 0)
         .arg(device.caseCharging ? 1 : 0)
         .arg(device.rateMilliwatts)
-        .arg(device.externalPower ? 1 : 0);
+        .arg(device.externalPower ? 1 : 0)
+        .arg(device.chargingKnown ? 1 : 0)
+        .arg(device.chargingManual ? 1 : 0);
 }
 
 QString levelToString(BatteryLevel level)

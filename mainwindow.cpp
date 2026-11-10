@@ -184,6 +184,7 @@ QString statusText(const BatteryDevice &device)
         }
     }
     if (device.charging) {
+        if (device.chargingManual) return MainWindow::tr("Charging (manual)");
         // 三路电量设备标明正在充电的部位（字母与 Case 单词，无需额外翻译），
         // 如 "Charging (L+Case)"；其它设备维持单一 "Charging"。
         if (isThreeChannelAudio(device.subType)) {
@@ -203,6 +204,7 @@ QString statusText(const BatteryDevice &device)
         }
         return MainWindow::tr("Charging");
     }
+    if (!device.chargingKnown) return MainWindow::tr("Connected (charging unknown)");
     return MainWindow::tr("Connected");
 }
 
@@ -808,6 +810,16 @@ void MainWindow::setupPages()
     addInfoRow(deviceSettingsLayout, m_deviceThresholdRowTitle, alertValueWidget);
     addInfoRow(deviceSettingsLayout, m_deviceAlertPolicyRowTitle, m_deviceAlertPolicyCombo);
     addInfoRow(deviceSettingsLayout, m_deviceKeepCacheRowTitle, m_deviceKeepCacheCheck);
+    m_deviceManualChargingRowTitle = new QLabel(tr("Charging status"));
+    m_deviceManualChargingCheck = new QCheckBox(tr("Manually mark as charging"));
+    m_deviceManualChargingCheck->setObjectName(QStringLiteral("deviceManualChargingCheck"));
+    m_deviceManualChargingCheck->setToolTip(tr("This device does not report charging. This is a manual label, not automatic detection. Clear it after unplugging."));
+    addInfoRow(deviceSettingsLayout, m_deviceManualChargingRowTitle, m_deviceManualChargingCheck);
+    connect(m_deviceManualChargingCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (m_currentDetailId.isEmpty()) return;
+        DeviceSettings::setManualCharging(m_currentDetailId, enabled);
+        m_manager->refreshNow();
+    });
     detailLayout->addWidget(m_deviceSettingsGroup);
 
     // —— 电量历史图表 ——
@@ -2015,6 +2027,11 @@ void MainWindow::retranslateUi()
     if (m_deviceThresholdRowTitle) m_deviceThresholdRowTitle->setText(tr("Low battery alert"));
     if (m_deviceAlertPolicyRowTitle) m_deviceAlertPolicyRowTitle->setText(tr("Repeat"));
     if (m_deviceKeepCacheRowTitle) m_deviceKeepCacheRowTitle->setText(tr("Keep cached"));
+    if (m_deviceManualChargingRowTitle) m_deviceManualChargingRowTitle->setText(tr("Charging status"));
+    if (m_deviceManualChargingCheck) {
+        m_deviceManualChargingCheck->setText(tr("Manually mark as charging"));
+        m_deviceManualChargingCheck->setToolTip(tr("This device does not report charging. This is a manual label, not automatic detection. Clear it after unplugging."));
+    }
     // 策略下拉框的条目文本需重译，但保留当前选中项与各 item 的 userData(策略枚举)。
     if (m_deviceAlertPolicyCombo) {
         const int cur = m_deviceAlertPolicyCombo->currentIndex();
@@ -2079,6 +2096,12 @@ void MainWindow::refreshDetailPage()
             // 无速率：插电通常是「已充满、停止充电」的空闲态，其余为未知。
             ? (device.externalPower ? tr("Idle") : tr("Unknown"))
             : watts + QStringLiteral(" W"));
+    }
+    if (m_deviceManualChargingCheck) {
+        const QSignalBlocker blocker(m_deviceManualChargingCheck);
+        m_deviceManualChargingRowTitle->parentWidget()->setVisible(!device.chargingKnown);
+        m_deviceManualChargingCheck->setChecked(DeviceSettings::manualCharging(id));
+        m_deviceManualChargingCheck->setEnabled(device.connected && !device.stale);
     }
     m_detailWiredValue->setText(yesNoText(device.wired));
     m_detailIdValue->setText(id.isEmpty() ? tr("Unknown") : id);

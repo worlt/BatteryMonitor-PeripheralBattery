@@ -1,14 +1,18 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$RuntimeDirectory,
-    [string]$Version = "v1.5.0-peripheral.1"
+    [string]$Version = "v1.5.0-peripheral.2"
 )
 
 $ErrorActionPreference = "Stop"
 $repository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ($Version -notmatch "^v[0-9]+[.][0-9]+[.][0-9]+-[a-z0-9.-]+$") {
-    throw "Use a fork release identifier such as v1.5.0-peripheral.1."
+    throw "Use a fork release identifier such as v1.5.0-peripheral.2."
 }
+$workingChanges = & git -C $repository status --porcelain --untracked-files=normal
+if ($LASTEXITCODE -ne 0 -or $workingChanges) { throw "Commit the reviewed source before packaging a release." }
+$sourceCommit = & git -C $repository rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw "Cannot determine source commit." }
 $runtime = (Resolve-Path -LiteralPath $RuntimeDirectory).Path
 $executable = Join-Path $runtime "bin/BatteryMonitor.exe"
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
@@ -64,18 +68,9 @@ New-Item -ItemType Directory -Path (Join-Path $portable "docs") -Force | Out-Nul
 Copy-ReleaseNotices $portable
 Compress-ReleaseDirectory $portable (Join-Path $releaseDirectory ("BatteryMonitor-" + $Version + "-win-x64-portable.zip"))
 
-$source = Join-Path $stagingDirectory ("BatteryMonitor-" + $Version + "-source")
-New-Item -ItemType Directory -Path $source -Force | Out-Null
-$sourceFiles = & git -C $repository -c core.quotepath=false ls-files --cached --others --exclude-standard
-if ($LASTEXITCODE -ne 0) { throw "Git source listing failed." }
-foreach ($relative in ($sourceFiles | Sort-Object -Unique)) {
-    $sourcePath = [IO.Path]::GetFullPath((Join-Path $repository $relative))
-    if (-not $sourcePath.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Source path resolves outside the repository."
-    }
-    Copy-ReleaseFile $sourcePath (Join-Path $source $relative)
-}
-Compress-ReleaseDirectory $source (Join-Path $releaseDirectory ("BatteryMonitor-" + $Version + "-source.zip"))
+$sourceArchive = Join-Path $releaseDirectory ("BatteryMonitor-" + $Version + "-source.zip")
+& git -C $repository archive --format=zip ("--prefix=BatteryMonitor-" + $Version + "-source/") ("--output=" + $sourceArchive) $sourceCommit
+if ($LASTEXITCODE -ne 0) { throw "Git source archive failed." }
 
 $plugin = Join-Path $stagingDirectory ("BatteryMonitor-" + $Version + "-gm3323d-plugin")
 New-Item -ItemType Directory -Path (Join-Path $plugin "licenses") -Force | Out-Null
@@ -102,13 +97,20 @@ $notes = @"
 - SHA256SUMS.txt：下载校验。
 
 ## 修改与限制
-- GM3323D：允许指定纯输入接口，只读输入报告；电量为未校准的 10% 档位约数，不声称精确或已验证充电状态。
-- S87Pro 蓝牙：优先 Windows PnP 电量属性，失败回退 GATT；不是硬编码 99%，属性可能缓存。未验证 2.4G/USB。
-- 单台设备验证；未完成长期休眠、物理拔插与全程放电验证。上游其他设备列表保留，但未全部重测。
+- GM3323D：修复充电报告被丢弃、鼠标消失的问题，解析观察到的充电标志；电量仍为未校准的 10% 档位约数，保持只读。
+- S87Pro 蓝牙：保留 Windows PnP 电量优先及 GATT 回退，两条百分比读取路径明确显示“充电未知”。自动充电识别仍未实现。
+- 设备详情新增“手动标记正在充电”，默认关闭、按设备保存，显示闪电和“正在充电（手动标记）”；拔线后需手动取消。断开或数据过期时不显示实时充电，重新连接后恢复已保存的选择。设备上报状态优先。
+- WebSocket 增加 chargingKnown / chargingSource（device、manual、unknown），保留原 charging 字段。
+- 单台设备采样验证，鼠标报告解析及充电来源/设置隔离回归测试通过。未完成长期休眠、全程充放电校准或全部上游设备重测；S87Pro 2.4G/USB 未验证。
 - 内部版本号沿用上游格式，请以本发布标识和校验区分。
+
+## 升级与回退
+退出旧程序，将便携包解压到新目录后运行；不要同时运行两个版本。系统中已有设置会继续使用。若遇回归，退出新程序后重新运行保留的 v1.5.0-peripheral.1；取消手动充电标记可恢复“充电未知”。旧版本 Release 保留。
 
 ## 许可与源码
 应用 MIT；原 LICENSE、鼠标协议参考 MIT、hidapi BSD、quickjs-ng MIT 与 Qt 许可随包。Qt 6.8.3 未修改动态库的对应源码直接下载地址、SHA256、替换说明及第三方官方 SPDX 清单见包内 docs/fork/RUNTIME-SOURCES.md 和 licenses/Qt-6.8.3/。该说明必须与二进制一起分发；发布者需维护对应源码访问。Microsoft 运行库不以 MIT 重新授权。
+
+源码提交：$sourceCommit
 
 主程序 SHA256：$executableHash
 "@
