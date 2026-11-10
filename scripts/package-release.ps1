@@ -69,7 +69,7 @@ Copy-ReleaseNotices $portable
 Compress-ReleaseDirectory $portable (Join-Path $releaseDirectory ("BatteryMonitor-" + $Version + "-win-x64-portable.zip"))
 
 $sourceArchive = Join-Path $releaseDirectory ("BatteryMonitor-" + $Version + "-source.zip")
-& git -C $repository archive --format=zip ("--prefix=BatteryMonitor-" + $Version + "-source/") ("--output=" + $sourceArchive) $sourceCommit
+& git -C $repository -c core.autocrlf=false archive --format=zip ("--prefix=BatteryMonitor-" + $Version + "-source/") ("--output=" + $sourceArchive) $sourceCommit
 if ($LASTEXITCODE -ne 0) { throw "Git source archive failed." }
 
 $plugin = Join-Path $stagingDirectory ("BatteryMonitor-" + $Version + "-gm3323d-plugin")
