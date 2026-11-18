@@ -13,3 +13,5 @@ Verification before upload:
 - Corrupt portable SHA256 and ZIP traversal input rejected before extraction outside staging.
 - Installer is unsigned; disclosed in installed guide and release docs.
 - Upload/publish verification follows the packaging-source commit; existing release tag and application archives are preserved.
+
+Completed: Setup.exe and installer-source.zip uploaded to the existing public Latest release; notes and SHA256 manifest updated. All seven remote asset digests match local files, and the original three application ZIPs and tag remain unchanged. Installer SHA256: `3e70bd704e56e24d6a3cec9da9f0226185ace4cadc26a100c4933b79b934868a`. Packaging source commit: `609ebc6a88abd70aa303395c084a88c8a56c124b`.
