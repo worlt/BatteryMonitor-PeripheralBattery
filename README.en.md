@@ -6,6 +6,8 @@ English | [简体中文](README.md)
 
 ## Fork release: v1.5.0-peripheral.3
 
+A per-user `win-x64-Setup.exe` installer is also available: no administrator rights or automatic startup, with Start menu shortcuts and an uninstaller that preserves settings/history. It is not code-signed; verify the release SHA256.
+
 Download the `win-x64-portable.zip` asset from this repository's Releases, extract the entire archive, and run `bin/BatteryMonitor.exe` on Windows 10/11 x64. No additional peripheral driver is needed for these two adaptations.
 
 - GM3323D now accepts both observed charging and discharging input reports, preventing the mouse from disappearing while charging. Battery percentage remains an uncalibrated approximation in 10% steps.

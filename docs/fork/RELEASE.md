@@ -36,3 +36,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 -RuntimeDir
 ## 回退
 
 退出当前程序，重新运行保留的上一版便携包。新增 ManualCharging 设置默认关闭，旧版不使用该键；无需删除已有托盘、提醒、别名和历史记录。回退后的充电显示遵循旧版行为，GM3323D 充电报告修复也将撤回。
+
+## 安装器补充附件
+
+可用 `scripts/package-installer.ps1` 从已校验的便携包生成 `win-x64-Setup.exe`，流程见 [INSTALLER.md](INSTALLER.md)。本次 peripheral.3 仅补充安装器和 `installer-source.zip`，原应用标签/源码 ZIP/便携 ZIP/插件 ZIP 保持不变。更新 Release 正文、RELEASE-NOTES.md 与 SHA256SUMS.txt，并检查新附件 hash。安装脚本提交与原应用提交分别记录；不要移动已发布标签。

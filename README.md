@@ -10,7 +10,9 @@
 
 ## 下载与使用
 
-在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.3-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
+安装版可在本仓库 GitHub **Releases** 下载 `BatteryMonitor-v1.5.0-peripheral.3-win-x64-Setup.exe`，双击安装后从开始菜单启动。安装到当前用户，不需要管理员权限；卸载保留设置与历史。安装器未代码签名，请核对 SHA256。详见 [安装版说明](docs/fork/INSTALLER.md)。
+
+免安装版：在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.3-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
 
 `dist/` 不进入 Git；运行包、源码包、插件包和校验文件只作为 Release 附件。具体打包与上传步骤见 [发布指南](docs/fork/RELEASE.md)。源码构建见 [构建指南](docs/fork/BUILD.md)。
 
