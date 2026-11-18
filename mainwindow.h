@@ -28,6 +28,7 @@ class QComboBox;
 class QDialog;
 class QEvent;
 class QFrame;
+class QKeyEvent;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -66,6 +67,7 @@ signals:
 protected:
     // 关闭窗口时拦截为最小化到托盘，而非真正退出。
     void closeEvent(QCloseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void changeEvent(QEvent *event) override;
 
 private slots:

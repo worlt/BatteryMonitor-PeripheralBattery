@@ -32,6 +32,8 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 
+`escape-tray` 使用真实 Qt 窗口和 offscreen 平台，验证主窗口及子控件 Esc、托盘恢复、菜单/对话框取消、按键修饰和无托盘保护；可选测试需要 Qt Test 模块。
+
 `charging-state` 验证设备/未知/手动来源、断开和过期状态、UI/RPC 变化检测及设置隔离。安装 Node.js 后还会注册 `gm3323d-plugin`，覆盖充/放电全档位、无效报告、超时和拔插异常。测试程序不安装进运行包。
 
 S87Pro 验证需要实际设备；设备 ID 和预期电量通过命令行传入。可选测试构建会生成 `build/tests/s87pro-windows-test.exe`；也可在开发终端中编译，输出到 build/：

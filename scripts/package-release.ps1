@@ -1,13 +1,13 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$RuntimeDirectory,
-    [string]$Version = "v1.5.0-peripheral.2"
+    [string]$Version = "v1.5.0-peripheral.3"
 )
 
 $ErrorActionPreference = "Stop"
 $repository = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if ($Version -notmatch "^v[0-9]+[.][0-9]+[.][0-9]+-[a-z0-9.-]+$") {
-    throw "Use a fork release identifier such as v1.5.0-peripheral.2."
+    throw "Use a fork release identifier such as v1.5.0-peripheral.3."
 }
 $workingChanges = & git -C $repository status --porcelain --untracked-files=normal
 if ($LASTEXITCODE -ne 0 -or $workingChanges) { throw "Commit the reviewed source before packaging a release." }
@@ -96,16 +96,21 @@ $notes = @"
 - gm3323d-plugin.zip：仅鼠标插件，需要本分支修正的宿主；不含键盘原生适配。
 - SHA256SUMS.txt：下载校验。
 
+## 本次更新
+- 主窗口内按 Esc 最小化到托盘，不退出程序；点击托盘图标恢复，托盘菜单“退出”仍可完全退出。
+- 输入控件有焦点时也可使用；下拉菜单或对话框保留原生 Esc 取消。复用窗口尺寸保存和首次托盘提示逻辑。
+- 新增真实 Qt 窗口的隔离回归测试；本次未修改外设电量和充电判断。
+
 ## 修改与限制
 - GM3323D：修复充电报告被丢弃、鼠标消失的问题，解析观察到的充电标志；电量仍为未校准的 10% 档位约数，保持只读。
 - S87Pro 蓝牙：保留 Windows PnP 电量优先及 GATT 回退，两条百分比读取路径明确显示“充电未知”。自动充电识别仍未实现。
 - 设备详情新增“手动标记正在充电”，默认关闭、按设备保存，显示闪电和“正在充电（手动标记）”；拔线后需手动取消。断开或数据过期时不显示实时充电，重新连接后恢复已保存的选择。设备上报状态优先。
 - WebSocket 增加 chargingKnown / chargingSource（device、manual、unknown），保留原 charging 字段。
-- 单台设备采样验证，鼠标报告解析及充电来源/设置隔离回归测试通过。未完成长期休眠、全程充放电校准或全部上游设备重测；S87Pro 2.4G/USB 未验证。
+- 单台设备采样验证，鼠标报告解析、充电来源/设置隔离及 Esc 托盘回归测试通过。未完成长期休眠、全程充放电校准或全部上游设备重测；S87Pro 2.4G/USB 未验证。
 - 内部版本号沿用上游格式，请以本发布标识和校验区分。
 
 ## 升级与回退
-退出旧程序，将便携包解压到新目录后运行；不要同时运行两个版本。系统中已有设置会继续使用。若遇回归，退出新程序后重新运行保留的 v1.5.0-peripheral.1；取消手动充电标记可恢复“充电未知”。旧版本 Release 保留。
+退出旧程序，将便携包解压到新目录后运行；不要同时运行两个版本。系统中已有设置会继续使用。若遇回归，退出新程序后重新运行保留的 v1.5.0-peripheral.2；取消手动充电标记可恢复“充电未知”。旧版本 Release 保留。
 
 ## 许可与源码
 应用 MIT；原 LICENSE、鼠标协议参考 MIT、hidapi BSD、quickjs-ng MIT 与 Qt 许可随包。Qt 6.8.3 未修改动态库的对应源码直接下载地址、SHA256、替换说明及第三方官方 SPDX 清单见包内 docs/fork/RUNTIME-SOURCES.md 和 licenses/Qt-6.8.3/。该说明必须与二进制一起分发；发布者需维护对应源码访问。Microsoft 运行库不以 MIT 重新授权。

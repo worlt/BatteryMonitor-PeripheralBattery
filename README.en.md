@@ -4,7 +4,7 @@
 
 English | [简体中文](README.md)
 
-## Fork release: v1.5.0-peripheral.2
+## Fork release: v1.5.0-peripheral.3
 
 Download the `win-x64-portable.zip` asset from this repository's Releases, extract the entire archive, and run `bin/BatteryMonitor.exe` on Windows 10/11 x64. No additional peripheral driver is needed for these two adaptations.
 
@@ -138,7 +138,7 @@ You can also open `CMakeLists.txt` directly with Qt Creator.
 
 ## Usage
 
-After launch, the main window shows the currently detected devices. Closing the window does not exit the app; it keeps running in the system tray. Use the tray menu to quit completely.
+After launch, the main window shows the currently detected devices. Pressing **Esc** in the main window (including focused input controls) or closing the window does not exit the app; it keeps running in the system tray. Click the tray icon to restore the window. Esc in an open dropdown or dialog only dismisses that popup/dialog. Use the tray menu to quit completely.
 
 The **Reminder** column in the device list provides a shortcut for enabling low-battery notifications. Notifications are off by default for new devices and are only sent after the checkbox is selected.
 

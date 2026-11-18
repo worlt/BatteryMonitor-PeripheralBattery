@@ -262,9 +262,30 @@ qt_generate_deploy_app_script(
 install(SCRIPT ${deploy_script})
 
 # Opt-in, isolated regression tests; hardware probe is built but not run by CTest.
-option(BATTERYMONITOR_BUILD_TESTS "Build charging regression tests and S87Pro hardware probe" OFF)
+option(BATTERYMONITOR_BUILD_TESTS "Build isolated regressions and S87Pro hardware probe" OFF)
 if(BATTERYMONITOR_BUILD_TESTS)
     enable_testing()
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    # Exercise the real window, sharing the app source/link configuration.
+    get_target_property(escape_tray_sources BatteryMonitor SOURCES)
+    list(FILTER escape_tray_sources EXCLUDE REGEX "(^|/)main[.]cpp$")
+    qt_add_executable(escape-tray-test tests/escape-tray-test.cpp ${escape_tray_sources})
+    foreach(property IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_LIBRARIES)
+        get_target_property(app_property BatteryMonitor ${property})
+        if(app_property)
+            set_property(TARGET escape-tray-test PROPERTY ${property} "${app_property}")
+        endif()
+    endforeach()
+    target_link_libraries(escape-tray-test PRIVATE Qt6::Test)
+    # Debug links can retain HID provider imports even without hardware access.
+    add_custom_command(TARGET escape-tray-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${HIDAPI_ROOT}/hidapi.dll $<TARGET_FILE_DIR:escape-tray-test>
+        VERBATIM)
+    add_dependencies(escape-tray-test generate_app_version)
+    set_target_properties(escape-tray-test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    add_test(NAME escape-tray COMMAND escape-tray-test -platform offscreen)
     add_executable(charging-state-test
         tests/charging-state-test.cpp
         src/rpc/DeviceJson.cpp

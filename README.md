@@ -6,13 +6,17 @@
 
 - 上游固定基线：[`50f628c1ae1ced004e9fa03737cee9d6a561d80e`](https://github.com/JKWTCN/BatteryMonitor/tree/50f628c1ae1ced004e9fa03737cee9d6a561d80e)。
 - 保留原说明：[中文上游 README](README.upstream.md)、[英文上游 README](README.upstream.en.md)。上游已验证设备列表不等于本分支重新验证过全部设备。
-- 发布标识：`v1.5.0-peripheral.2`；程序内部仍沿用上游版本编号格式。请以本分支 Release 标识和 SHA256 区分，不要仅看 EXE 内部版本号。
+- 发布标识：`v1.5.0-peripheral.3`；程序内部仍沿用上游版本编号格式。请以本分支 Release 标识和 SHA256 区分，不要仅看 EXE 内部版本号。
 
 ## 下载与使用
 
-在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.2-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
+在本仓库的 GitHub **Releases** 页面下载 `BatteryMonitor-v1.5.0-peripheral.3-win-x64-portable.zip`，完整解压后运行 `bin/BatteryMonitor.exe`。不要只复制 EXE，不需要管理员权限或额外安装外设驱动。Windows 10/11 x64。
 
 `dist/` 不进入 Git；运行包、源码包、插件包和校验文件只作为 Release 附件。具体打包与上传步骤见 [发布指南](docs/fork/RELEASE.md)。源码构建见 [构建指南](docs/fork/BUILD.md)。
+
+### Esc 最小化到托盘
+
+主窗口内按 **Esc**（包括输入框等控件获得焦点时）会隐藏到系统托盘，电量监测继续运行，不会退出程序。点击托盘图标可恢复窗口；完全退出请使用托盘右键菜单的“退出”。打开下拉菜单或对话框时，Esc 优先关闭菜单或取消对话框，不隐藏主窗口。窗口尺寸和首次托盘提示与关闭窗口的行为一致。
 
 ## 本分支适配与限制
 

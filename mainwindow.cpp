@@ -23,6 +23,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLayout>
 #include <QLayoutItem>
 #include <QLineEdit>
@@ -1597,6 +1598,19 @@ void MainWindow::closeEvent(QCloseEvent *event)
         return;
     }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event)
+{
+    // Child controls/popups get first refusal; reuse the normal close-to-tray path.
+    // Without a visible tray, Esc must not close the app or make it inaccessible.
+    if (event->key() == Qt::Key_Escape && event->modifiers() == Qt::NoModifier
+        && m_tray && m_tray->isVisible()) {
+        close();
+        event->accept();
+        return;
+    }
+    QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::changeEvent(QEvent *event)

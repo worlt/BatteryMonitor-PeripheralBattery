@@ -7,14 +7,14 @@
 按 [构建指南](BUILD.md) 从发布仓库生成完整运行目录，运行回归测试并提交已审查的源码，然后在干净工作区根目录执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 -RuntimeDirectory dist/runtime -Version v1.5.0-peripheral.2
+powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 -RuntimeDirectory dist/runtime -Version v1.5.0-peripheral.3
 ```
 
-输出目录为 dist/releases/v1.5.0-peripheral.2/：
+输出目录为 dist/releases/v1.5.0-peripheral.3/：
 
-- BatteryMonitor-v1.5.0-peripheral.2-win-x64-portable.zip：完整运行包，入口为 bin/BatteryMonitor.exe。
-- BatteryMonitor-v1.5.0-peripheral.2-source.zip：对应源码、必需构建依赖、测试与许可。
-- BatteryMonitor-v1.5.0-peripheral.2-gm3323d-plugin.zip：鼠标插件与许可，需要包含本分支修正的宿主。
+- BatteryMonitor-v1.5.0-peripheral.3-win-x64-portable.zip：完整运行包，入口为 bin/BatteryMonitor.exe。
+- BatteryMonitor-v1.5.0-peripheral.3-source.zip：对应源码、必需构建依赖、测试与许可。
+- BatteryMonitor-v1.5.0-peripheral.3-gm3323d-plugin.zip：鼠标插件与许可，需要包含本分支修正的宿主。
 - SHA256SUMS.txt：附件校验文件。
 - RELEASE-NOTES.md：发布说明。
 
@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 -RuntimeDir
 
 ## GitHub 发布
 
-创建指向该源码提交的 `v1.5.0-peripheral.2` 注释标签，非强制推送 `master` 与标签。先创建 Release 草稿并上传上述三个 ZIP、SHA256SUMS.txt、RELEASE-NOTES.md；检查名称、大小及校验后发布为非预发行版，设为 Latest。保留旧版 Release 和标签。不要把整个 dist/ 目录或打包暂存目录上传。
+创建指向该源码提交的 `v1.5.0-peripheral.3` 注释标签，非强制推送 `master` 与标签。先创建 Release 草稿并上传上述三个 ZIP、SHA256SUMS.txt、RELEASE-NOTES.md；检查名称、大小及校验后发布为非预发行版，设为 Latest。保留旧版 Release 和标签。不要把整个 dist/ 目录或打包暂存目录上传。
 
 普通仓库应保留上游来源声明。若使用 GitHub Fork，应在上游提交历史上应用修改，不要用无共同历史的仓库强制覆盖 Fork。
 

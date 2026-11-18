@@ -9,7 +9,8 @@
 - external/quickjs/：JS 引擎源码。
 - external/hidapi/：必要头文件、hidapi.dll 和 hidapi.lib。
 - plugins/：原有插件和新增 GM3323D 只读插件。
-- tests/：插件测试和 S87Pro 真实设备验证程序。
+- tests/：Esc 托盘和充电状态隔离回归、插件测试，以及 S87Pro 真实设备验证程序。
+- tasks/：本次功能与发布的执行计划及验收记录。
 - docs/、scripts/：使用、构建与发布材料。
 - LICENSE、UPSTREAM.md、MODIFICATIONS.md、licenses/：上游来源、修改声明及完整许可。
 
